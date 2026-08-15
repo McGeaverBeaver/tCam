@@ -18,6 +18,15 @@ To monitor diagnostic information from the firmware: ```idf.py -p PORT```.  Outp
 
 ### Revision History
 
+#### FW 4.0
+FW revision 4.0 makes the camera self-contained.
+
+1. On-camera web interface (viewer, configuration, capture, OTA update) served from the camera itself over HTTP and HTTPS - no application install needed.  See [WEB_UI.md](WEB_UI.md).
+2. Captive portal in access point mode; AP moved to 192.168.58.1 and the stored AP address is now actually applied to the interface.
+3. Per-camera self-signed TLS certificate generated on-device (EC P-256, valid to 2050).
+4. Interrupt-driven Lepton vsync and event-driven response dispatch.
+5. Fixed command parser out-of-bounds accesses, an RX buffer overflow, the station-mode IP address never being recorded (IP_EVENT_ETH_GOT_IP vs IP_EVENT_STA_GOT_IP), and a 53 KB image buffer needlessly held in internal DMA memory on network interfaces.
+
 #### FW 3.2 (8/22/2023)
 FW revision 3.2 is a minor change to properly identify the Lepton 3.1R module.
 

@@ -233,10 +233,20 @@ static void start_https_server()
 	const unsigned char* cert_pem;
 	const unsigned char* key_pem;
 	esp_err_t ret;
+	int wait;
 	net_info_t* net_infoP = (*net_get_info)();
 	size_t cert_len, key_len;
 	unsigned char ip4[4];
 	httpd_ssl_config_t conf = HTTPD_SSL_CONFIG_DEFAULT();
+
+	// In station mode the "connected" flag is raised at association, before DHCP
+	// hands out an address.  The certificate embeds the address in its SAN, so
+	// wait briefly for a real one rather than issuing a certificate for 0.0.0.0.
+	for (wait = 0; wait < 30; wait++) {
+		if ((net_infoP->cur_ip_addr[3] | net_infoP->cur_ip_addr[2] |
+		     net_infoP->cur_ip_addr[1] | net_infoP->cur_ip_addr[0]) != 0) break;
+		vTaskDelay(pdMS_TO_TICKS(500));
+	}
 
 	// cur_ip_addr index 3 holds the first octet (see ps_utilities)
 	ip4[0] = net_infoP->cur_ip_addr[3];

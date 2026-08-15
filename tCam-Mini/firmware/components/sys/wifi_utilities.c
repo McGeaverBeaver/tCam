@@ -120,7 +120,11 @@ bool wifi_init()
 		return false;
 	}
 	
-	ret = esp_event_handler_register(IP_EVENT, IP_EVENT_ETH_GOT_IP, &ip_event_handler, NULL);
+	// STA_GOT_IP, not ETH_GOT_IP: this module only ever runs the WiFi interface
+	// (ethernet has its own utilities), and the DHCP address arrives with the
+	// station event.  The handler was registered for the ethernet event, so in
+	// station mode it never fired and cur_ip_addr stayed 0.0.0.0.
+	ret = esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &ip_event_handler, NULL);
 	if (ret != ESP_OK) {
 		ESP_LOGE(TAG, "Could not register ip_event_handler (%d)", ret);
 		return false;
