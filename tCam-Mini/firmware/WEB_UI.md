@@ -33,8 +33,16 @@ system's own connectivity check lands on the camera and triggers the usual
 3. Tick **Join this network at startup** and save.
 
 The camera then appears at `http://<camera-name>.local` — it advertises `_http._tcp`
-over mDNS, so it also shows up in network browsers. If it cannot join, it falls back
-to its own access point, so a mistyped password does not need a cable to fix.
+over mDNS, so it also shows up in network browsers.
+
+**Recovery access point.**  If the configured network is unreachable for about a
+minute — a mistyped password, or the camera moved to a new location — it raises its
+own access point *while continuing to retry the configured network underneath*.
+Join `tCam-Mini-XXXX`, the captive portal opens, and you can point the camera at a
+new network (or set it back to access point mode) exactly like first-time setup.
+Nothing is stored until you save: if the original network comes back — a rebooted
+router — the camera rejoins it and the recovery AP dissolves on its own.  Moving
+between locations therefore never needs a reset or a cable.
 
 ## What the interface does
 

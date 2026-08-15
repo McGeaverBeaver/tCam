@@ -41,6 +41,13 @@
 // client_if, but simply being able to load the page should not be exclusive.
 #define WIFI_AP_MAX_CONN              4
 
+// Consecutive failed attempts to reach the configured network before the camera
+// raises its own recovery access point (station keeps retrying underneath).
+// Each failed attempt takes several seconds of scanning, so this lands at
+// roughly 45-90 seconds - late enough not to trigger on a router rebooting,
+// and if it does, no harm: the AP dissolves the moment the station connects.
+#define WIFI_FALLBACK_AP_FAILS        12
+
 
 //
 // WiFi Utilities API
@@ -55,5 +62,12 @@ net_info_t* wifi_get_info();
  * station on someone else's network.
  */
 bool wifi_is_ap_mode();
+
+/**
+ * True while the recovery access point is up because the configured network is
+ * unreachable.  The camera behaves as an AP (captive portal, AP address) even
+ * though its stored configuration says station mode.
+ */
+bool wifi_is_fallback_active();
 
 #endif /* WIFI_UTILITIES_H */

@@ -25,6 +25,7 @@
  */
 #include "wifi_utilities.h"
 #include "ps_utilities.h"
+#include "dns_hijack.h"
 #include "esp_system.h"
 #include "esp_log.h"
 #include "esp_event.h"
@@ -72,6 +73,14 @@ static const wifi_country_t def_country_info = {
 
 static bool sta_connected = false; // Set when we connect to an AP so we can disconnect if we restart
 static int sta_retry_num = 0;
+static int sta_fail_count = 0;     // Consecutive failed attempts, for fallback triggering
+
+// Recovery access point state.  When the camera is configured to join a network
+// it cannot find - typically because it moved to a new location - it raises its
+// own access point alongside the (still retrying) station so it can be
+// reconfigured from the captive portal without a reset or a cable.
+static bool fallback_active = false;
+static esp_netif_t *fallback_netif = NULL;
 
 
 
@@ -82,6 +91,10 @@ static bool init_esp_wifi();
 static bool enable_esp_wifi_ap();
 static bool enable_esp_wifi_client();
 static bool sta_should_connect();
+static bool apply_ap_ip_config(esp_netif_t* netif);
+static void load_ap_wifi_config(wifi_config_t* cfg);
+static void enable_fallback_ap();
+static void disable_fallback_ap();
 static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data);
 static void ip_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data);
 
@@ -186,6 +199,18 @@ bool wifi_init()
  */
 bool wifi_reinit()
 {
+	// Tear down a recovery AP before rebuilding - the netif is destroyed here so
+	// the next fallback episode (if any) creates it fresh against the new config
+	if (fallback_active) {
+		dns_hijack_stop();
+		fallback_active = false;
+	}
+	if (fallback_netif != NULL) {
+		esp_netif_destroy_default_wifi(fallback_netif);
+		fallback_netif = NULL;
+	}
+	sta_fail_count = 0;
+
 	// Attempt to disconnect from an AP if we were previously connected
 	if (sta_connected) {
 		ESP_LOGI(TAG, "Attempting to disconnect from AP");
@@ -326,43 +351,13 @@ static bool enable_esp_wifi_ap()
 	// Create the esp_netif object
 	wifi_netif = esp_netif_create_default_wifi_ap();
 
-	// Apply the configured AP address.  Persistent storage always carried an AP
-	// address but nothing ever pushed it into the interface, so the camera always
-	// came up on the esp_netif default of 192.168.4.1.  The DHCP server must be
-	// stopped around the change; the stop can fail harmlessly if it has not been
-	// started yet.  The DHCP pool follows the interface address automatically.
-	{
-		esp_netif_ip_info_t ip_info;
-
-		// Note: index 3 holds the first octet (see ps_utilities)
-		esp_netif_set_ip4_addr(&ip_info.ip, wifi_info.ap_ip_addr[3], wifi_info.ap_ip_addr[2],
-		                       wifi_info.ap_ip_addr[1], wifi_info.ap_ip_addr[0]);
-		esp_netif_set_ip4_addr(&ip_info.gw, wifi_info.ap_ip_addr[3], wifi_info.ap_ip_addr[2],
-		                       wifi_info.ap_ip_addr[1], wifi_info.ap_ip_addr[0]);
-		esp_netif_set_ip4_addr(&ip_info.netmask, 255, 255, 255, 0);
-
-		(void) esp_netif_dhcps_stop(wifi_netif);
-		ret = esp_netif_set_ip_info(wifi_netif, &ip_info);
-		if (ret != ESP_OK) {
-			ESP_LOGE(TAG, "Could not set AP IP address (%d)", ret);
-			return false;
-		}
-		(void) esp_netif_dhcps_start(wifi_netif);
+	if (!apply_ap_ip_config(wifi_netif)) {
+		return false;
 	}
 
 	// Enable the AP
-	wifi_config_t wifi_config = {
-        .ap = {
-            .ssid_len = strlen(wifi_info.ap_ssid),
-            .max_connection = WIFI_AP_MAX_CONN,
-            .authmode = WIFI_AUTH_WPA_WPA2_PSK
-        }
-    };
-    strcpy((char*) wifi_config.ap.ssid, wifi_info.ap_ssid);
-    strcpy((char*) wifi_config.ap.password, wifi_info.ap_pw);
-    if (strlen(wifi_info.ap_pw) == 0) {
-        wifi_config.ap.authmode = WIFI_AUTH_OPEN;
-    }
+	wifi_config_t wifi_config;
+	load_ap_wifi_config(&wifi_config);
 
     // APSTA rather than AP: the station interface is not associated with anything,
     // but its presence is what allows esp_wifi_scan_start() to run while we are
@@ -533,7 +528,12 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t e
         	break;
         	
         case WIFI_EVENT_STA_DISCONNECTED:
-        	wifi_info.flags &= ~NET_INFO_FLAG_CONNECTED;
+        	// In fallback the AP is our functioning interface - do not clear the
+        	// flag the web server and portal depend on just because the station
+        	// side of the radio failed another attempt
+        	if (!fallback_active) {
+        		wifi_info.flags &= ~NET_INFO_FLAG_CONNECTED;
+        	}
         	// A scan-only station has nothing to reconnect to.  Retrying here would
         	// spin the driver through connect/fail/connect as fast as it can, which
         	// disturbs the access point we are actually serving.
@@ -544,6 +544,13 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t e
         		vTaskDelay(pdMS_TO_TICKS(1000));
         	} else {
         		sta_retry_num++;
+        	}
+        	// The configured network has been unreachable long enough that the
+        	// camera has probably moved.  Raise the recovery AP so it can be
+        	// re-provisioned from the captive portal; the station keeps retrying
+        	// underneath, so a returning network is rejoined automatically.
+        	if (++sta_fail_count == WIFI_FALLBACK_AP_FAILS) {
+        		enable_fallback_ap();
         	}
             esp_wifi_connect();
             ESP_LOGI(TAG, "Retry connection to %s", wifi_info.sta_ssid);
@@ -560,10 +567,15 @@ static void ip_event_handler(void *arg, esp_event_base_t event_base, int32_t eve
 {
 	ip_event_got_ip_t *event = (ip_event_got_ip_t *) event_data;
 	const esp_netif_ip_info_t *ip_info = &event->ip_info;
-	
+
+	// The configured network is reachable again (or the camera was just
+	// re-provisioned onto a new one) - the recovery AP has done its job
+	disable_fallback_ap();
+
 	wifi_info.flags |= NET_INFO_FLAG_CONNECTED;
     sta_connected = true;
     sta_retry_num = 0;
+    sta_fail_count = 0;
     
 	ESP_LOGI(TAG, "Got IP Address: " IPSTR, IP2STR(&ip_info->ip));
 	
@@ -571,4 +583,136 @@ static void ip_event_handler(void *arg, esp_event_base_t event_base, int32_t eve
     wifi_info.cur_ip_addr[2] = (ip_info->ip.addr >> 8) & 0xFF;
     wifi_info.cur_ip_addr[1] = (ip_info->ip.addr >> 16) & 0xFF;
 	wifi_info.cur_ip_addr[0] = (ip_info->ip.addr >> 24) & 0xFF;
+}
+
+
+/**
+ * Push the configured AP address into a netif and restart its DHCP server.
+ * Persistent storage always carried an AP address but nothing ever applied it,
+ * so the camera used to come up on the esp_netif default of 192.168.4.1.  The
+ * DHCP server must be stopped around the change - the stop fails harmlessly if
+ * it has not started yet - and the DHCP pool follows the address automatically.
+ */
+static bool apply_ap_ip_config(esp_netif_t* netif)
+{
+	esp_err_t ret;
+	esp_netif_ip_info_t ip_info;
+
+	// Note: index 3 holds the first octet (see ps_utilities)
+	esp_netif_set_ip4_addr(&ip_info.ip, wifi_info.ap_ip_addr[3], wifi_info.ap_ip_addr[2],
+	                       wifi_info.ap_ip_addr[1], wifi_info.ap_ip_addr[0]);
+	esp_netif_set_ip4_addr(&ip_info.gw, wifi_info.ap_ip_addr[3], wifi_info.ap_ip_addr[2],
+	                       wifi_info.ap_ip_addr[1], wifi_info.ap_ip_addr[0]);
+	esp_netif_set_ip4_addr(&ip_info.netmask, 255, 255, 255, 0);
+
+	(void) esp_netif_dhcps_stop(netif);
+	ret = esp_netif_set_ip_info(netif, &ip_info);
+	if (ret != ESP_OK) {
+		ESP_LOGE(TAG, "Could not set AP IP address (%d)", ret);
+		return false;
+	}
+	(void) esp_netif_dhcps_start(netif);
+
+	return true;
+}
+
+
+/**
+ * Fill in the SoftAP configuration from the camera's stored identity
+ */
+static void load_ap_wifi_config(wifi_config_t* cfg)
+{
+	memset(cfg, 0, sizeof(wifi_config_t));
+	cfg->ap.ssid_len = strlen(wifi_info.ap_ssid);
+	cfg->ap.max_connection = WIFI_AP_MAX_CONN;
+	cfg->ap.authmode = WIFI_AUTH_WPA_WPA2_PSK;
+	strcpy((char*) cfg->ap.ssid, wifi_info.ap_ssid);
+	strcpy((char*) cfg->ap.password, wifi_info.ap_pw);
+	if (strlen(wifi_info.ap_pw) == 0) {
+		cfg->ap.authmode = WIFI_AUTH_OPEN;
+	}
+}
+
+
+/**
+ * Raise the recovery access point.  Called from the station retry path when the
+ * configured network has been unreachable for a while - the usual reason being
+ * that the camera moved to a new location.  The station keeps retrying in the
+ * background, so if the configured network comes back (a rebooted router) the
+ * camera rejoins it and the recovery AP dissolves; meanwhile anyone can join the
+ * camera's own network and re-provision it from the captive portal.
+ *
+ * Runtime-only: nothing here touches persistent storage.
+ */
+static void enable_fallback_ap()
+{
+	int i;
+	wifi_config_t wifi_config;
+
+	if (fallback_active) return;
+
+	ESP_LOGI(TAG, "Cannot reach '%s' - raising recovery AP '%s' at %d.%d.%d.%d",
+	         wifi_info.sta_ssid, wifi_info.ap_ssid,
+	         wifi_info.ap_ip_addr[3], wifi_info.ap_ip_addr[2],
+	         wifi_info.ap_ip_addr[1], wifi_info.ap_ip_addr[0]);
+
+	// The AP netif is created once and reused across fallback episodes
+	if (fallback_netif == NULL) {
+		fallback_netif = esp_netif_create_default_wifi_ap();
+		if (fallback_netif == NULL) {
+			ESP_LOGE(TAG, "Could not create recovery AP netif");
+			return;
+		}
+	}
+	if (!apply_ap_ip_config(fallback_netif)) return;
+
+	load_ap_wifi_config(&wifi_config);
+
+	if (esp_wifi_set_mode(WIFI_MODE_APSTA) != ESP_OK) {
+		ESP_LOGE(TAG, "Could not enter APSTA for recovery");
+		return;
+	}
+	if (esp_wifi_set_config(ESP_IF_WIFI_AP, &wifi_config) != ESP_OK) {
+		ESP_LOGE(TAG, "Could not configure recovery AP");
+		return;
+	}
+
+	// Present the AP address as ours and mark the interface usable so the web
+	// server (which waits for connectivity at boot) comes up and can serve the
+	// portal.  Clients joining the AP get the same captive-portal flow as a
+	// factory-fresh camera.
+	for (i = 0; i < 4; i++) {
+		wifi_info.cur_ip_addr[i] = wifi_info.ap_ip_addr[i];
+	}
+	wifi_info.flags |= NET_INFO_FLAG_CONNECTED;
+
+	dns_hijack_start(((uint32_t) wifi_info.ap_ip_addr[3])       |
+	                 ((uint32_t) wifi_info.ap_ip_addr[2] << 8)  |
+	                 ((uint32_t) wifi_info.ap_ip_addr[1] << 16) |
+	                 ((uint32_t) wifi_info.ap_ip_addr[0] << 24));
+
+	fallback_active = true;
+}
+
+
+/**
+ * Dissolve the recovery access point after the station successfully joined a
+ * network.  Joined clients are dropped - expected, since either the original
+ * network returned or they just re-provisioned the camera onto a new one.
+ */
+static void disable_fallback_ap()
+{
+	if (!fallback_active) return;
+
+	ESP_LOGI(TAG, "Station connected - dissolving recovery AP");
+
+	dns_hijack_stop();
+	(void) esp_wifi_set_mode(WIFI_MODE_STA);
+	fallback_active = false;
+}
+
+
+bool wifi_is_fallback_active()
+{
+	return fallback_active;
 }

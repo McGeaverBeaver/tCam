@@ -344,12 +344,16 @@ static esp_err_t status_get_handler(httpd_req_t* req)
 	net_infoP = (*net_get_info)();
 	ctrl_get_if_mode(&brd_type, &if_type);
 
+	// The recovery access point behaves as AP mode regardless of what the stored
+	// configuration says - report it that way so the UI shows the right data
+	bool ap_like = wifi_is_ap_mode() || wifi_is_fallback_active();
+
 	// Signal strength means different things depending on which side we are on.
 	// As a station it is our link to the router.  As an access point we have no
 	// single link, so report the strongest associated station - in practice the
 	// device closest to the camera, which is usually the one being held.
 	if (if_type == CTRL_IF_MODE_WIFI) {
-		if (wifi_is_ap_mode()) {
+		if (ap_like) {
 			static wifi_sta_list_t sta_list;
 
 			if (esp_wifi_ap_get_sta_list(&sta_list) == ESP_OK) {
@@ -381,7 +385,7 @@ static esp_err_t status_get_handler(httpd_req_t* req)
 		app_desc->version,
 		(brd_type == CTRL_BRD_ETH_TYPE) ? CAMERA_MODEL_NUM_ETH : CAMERA_MODEL_NUM_WIFI,
 		(if_type == CTRL_IF_MODE_ETH) ? "Ethernet" : "WiFi",
-		wifi_is_ap_mode() ? "ap" : "sta",
+		ap_like ? "ap" : "sta",
 		net_infoP->cur_ip_addr[3], net_infoP->cur_ip_addr[2],
 		net_infoP->cur_ip_addr[1], net_infoP->cur_ip_addr[0],
 		net_infoP->sta_ssid,
