@@ -101,13 +101,17 @@ void web_task()
 
 	// Only hijack DNS while we are the access point.  On someone else's network
 	// there is a real resolver and answering for every name would be hostile.
+	// Note: cur_ip_addr index 3 holds the FIRST octet (see ps_utilities), and the
+	// first octet is the lowest byte in network order.
 	if (wifi_is_ap_mode()) {
 		net_infoP = (*net_get_info)();
-		dns_hijack_start(((uint32_t) net_infoP->cur_ip_addr[0])       |
-		                 ((uint32_t) net_infoP->cur_ip_addr[1] << 8)  |
-		                 ((uint32_t) net_infoP->cur_ip_addr[2] << 16) |
-		                 ((uint32_t) net_infoP->cur_ip_addr[3] << 24));
-		ESP_LOGI(TAG, "Captive portal active");
+		dns_hijack_start(((uint32_t) net_infoP->cur_ip_addr[3])       |
+		                 ((uint32_t) net_infoP->cur_ip_addr[2] << 8)  |
+		                 ((uint32_t) net_infoP->cur_ip_addr[1] << 16) |
+		                 ((uint32_t) net_infoP->cur_ip_addr[0] << 24));
+		ESP_LOGI(TAG, "Captive portal active on %d.%d.%d.%d",
+		         net_infoP->cur_ip_addr[3], net_infoP->cur_ip_addr[2],
+		         net_infoP->cur_ip_addr[1], net_infoP->cur_ip_addr[0]);
 	}
 
 	// The server runs on its own task from here; nothing left to do but stay alive
@@ -210,8 +214,8 @@ static esp_err_t status_get_handler(httpd_req_t* req)
 		(brd_type == CTRL_BRD_ETH_TYPE) ? CAMERA_MODEL_NUM_ETH : CAMERA_MODEL_NUM_WIFI,
 		(if_type == CTRL_IF_MODE_ETH) ? "Ethernet" : "WiFi",
 		wifi_is_ap_mode() ? "ap" : "sta",
-		net_infoP->cur_ip_addr[0], net_infoP->cur_ip_addr[1],
-		net_infoP->cur_ip_addr[2], net_infoP->cur_ip_addr[3],
+		net_infoP->cur_ip_addr[3], net_infoP->cur_ip_addr[2],
+		net_infoP->cur_ip_addr[1], net_infoP->cur_ip_addr[0],
 		net_infoP->sta_ssid,
 		ota_active ? "true" : "false");
 
@@ -380,9 +384,10 @@ static esp_err_t redirect_handler(httpd_req_t* req, httpd_err_code_t err)
 
 	(void) err;   // every 404 gets the same treatment
 
+	// cur_ip_addr index 3 holds the first octet (see ps_utilities)
 	snprintf(location, sizeof(location), "http://%d.%d.%d.%d/",
-	         net_infoP->cur_ip_addr[0], net_infoP->cur_ip_addr[1],
-	         net_infoP->cur_ip_addr[2], net_infoP->cur_ip_addr[3]);
+	         net_infoP->cur_ip_addr[3], net_infoP->cur_ip_addr[2],
+	         net_infoP->cur_ip_addr[1], net_infoP->cur_ip_addr[0]);
 
 	httpd_resp_set_status(req, "302 Found");
 	httpd_resp_set_hdr(req, "Location", location);

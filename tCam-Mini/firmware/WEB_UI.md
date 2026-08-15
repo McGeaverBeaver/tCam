@@ -15,7 +15,12 @@ socket.
 
 1. Join the camera's WiFi network, `tCam-Mini-XXXX`.
 2. Your phone or laptop should pop the interface up by itself. If it does not,
-   browse to `http://192.168.4.1/`.
+   browse to `http://192.168.58.1/`.
+
+   (The camera's own network is 192.168.58.x specifically because the more common
+   192.168.4.x collides with the LAN subnet some consumer routers hand out — a
+   collision that makes the camera unreachable from any device that can also see
+   that LAN.)
 
 The camera answers every DNS query while it is an access point, so the operating
 system's own connectivity check lands on the camera and triggers the usual

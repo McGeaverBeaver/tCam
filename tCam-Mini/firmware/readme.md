@@ -396,7 +396,7 @@ Streaming is a slightly special case for the command interface.  Responses are t
     "ap_ssid": "tCam-Mini-EFB5",
     "sta_ssid": "HomeNetwork",
     "flags": 143,
-    "ap_ip_addr": "192.168.4.1",
+    "ap_ip_addr": "192.168.58.1",
     "sta_ip_addr": "10.0.1.144",
     "sta_netmask":"255.255.255.0",
     "cur_ip_addr": "10.0.1.144"
@@ -433,7 +433,7 @@ Password information is not sent as part of the wifi response.
   "args": {
     "ap_ssid": "ANewApName",
     "ap_pw: "apassword",
-    "ap_ip_addr": "192.168.4.1",
+    "ap_ip_addr": "192.168.58.1",
     "flags": 145,
     "sta_ssid": "HomeNetwork",
     "sta_pw": "anotherpassword",

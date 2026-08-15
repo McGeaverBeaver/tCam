@@ -321,7 +321,31 @@ static bool enable_esp_wifi_ap()
 	
 	// Create the esp_netif object
 	wifi_netif = esp_netif_create_default_wifi_ap();
-	
+
+	// Apply the configured AP address.  Persistent storage always carried an AP
+	// address but nothing ever pushed it into the interface, so the camera always
+	// came up on the esp_netif default of 192.168.4.1.  The DHCP server must be
+	// stopped around the change; the stop can fail harmlessly if it has not been
+	// started yet.  The DHCP pool follows the interface address automatically.
+	{
+		esp_netif_ip_info_t ip_info;
+
+		// Note: index 3 holds the first octet (see ps_utilities)
+		esp_netif_set_ip4_addr(&ip_info.ip, wifi_info.ap_ip_addr[3], wifi_info.ap_ip_addr[2],
+		                       wifi_info.ap_ip_addr[1], wifi_info.ap_ip_addr[0]);
+		esp_netif_set_ip4_addr(&ip_info.gw, wifi_info.ap_ip_addr[3], wifi_info.ap_ip_addr[2],
+		                       wifi_info.ap_ip_addr[1], wifi_info.ap_ip_addr[0]);
+		esp_netif_set_ip4_addr(&ip_info.netmask, 255, 255, 255, 0);
+
+		(void) esp_netif_dhcps_stop(wifi_netif);
+		ret = esp_netif_set_ip_info(wifi_netif, &ip_info);
+		if (ret != ESP_OK) {
+			ESP_LOGE(TAG, "Could not set AP IP address (%d)", ret);
+			return false;
+		}
+		(void) esp_netif_dhcps_start(wifi_netif);
+	}
+
 	// Enable the AP
 	wifi_config_t wifi_config = {
         .ap = {

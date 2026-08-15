@@ -250,6 +250,17 @@ bool ps_init(int brd, int iface)
 	} else {
 		ESP_LOGI(TAG, "Reading NVS WiFi info");
 		success &= ps_read_net_info(CTRL_IF_MODE_WIFI);
+
+		// Migrate the AP address away from the old hard-coded default.  Before the
+		// AP address was actually applied to the interface (see enable_esp_wifi_ap)
+		// this stored value was inert and always 192.168.4.1, so rewriting exactly
+		// that value cannot clobber a deliberate user choice.
+		if ((ps_wifi_info.ap_ip_addr[3] == 192) && (ps_wifi_info.ap_ip_addr[2] == 168) &&
+		    (ps_wifi_info.ap_ip_addr[1] == 4)   && (ps_wifi_info.ap_ip_addr[0] == 1)) {
+			ESP_LOGI(TAG, "Migrating AP address to 192.168.58.1");
+			ps_wifi_info.ap_ip_addr[1] = 58;
+			success &= ps_write_net_info(CTRL_IF_MODE_WIFI);
+		}
 	}
 	
 	// Ethernet Info only loaded on the ethernet board type
@@ -478,9 +489,11 @@ static void ps_default_net_info(int iface)
 		local->flags |= NET_INFO_FLAG_CLIENT_MODE;
 	}
 	
+	// 192.168.58.x rather than the esp_netif default 192.168.4.x, which collides
+	// with the LAN subnet several popular consumer routers hand out
 	local->ap_ip_addr[3] = 192;
 	local->ap_ip_addr[2] = 168;
-	local->ap_ip_addr[1] = 4;
+	local->ap_ip_addr[1] = 58;
 	local->ap_ip_addr[0] = 1;
 	local->sta_ip_addr[3] = 192;
 	local->sta_ip_addr[2] = 168;
