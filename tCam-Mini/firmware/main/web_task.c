@@ -268,9 +268,12 @@ static void start_https_server()
 	// Generous relative to the ~750 mSec an ECDHE handshake takes here
 	conf.httpd.recv_wait_timeout = 30;
 	conf.httpd.send_wait_timeout = 30;
-	// Note: no custom close_fn here - esp_https_server owns session teardown for
-	// TLS sockets.  A browser that vanishes is released when its next WebSocket
-	// send fails instead.
+	// Note: no custom close_fn here.  httpd_ssl_start() installs its own open_fn
+	// and per-socket transport context to carry the TLS session, and overriding
+	// the close path risks tearing that down in the wrong order.  The cost is
+	// that a browser which disappears over HTTPS is not reported to web_cmd by a
+	// close callback; the session is released when the next WebSocket send to it
+	// fails instead, which client_if already handles.
 
 	ret = httpd_ssl_start(&servers, &conf);
 	if (ret != ESP_OK) {

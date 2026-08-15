@@ -162,10 +162,16 @@ bool cert_get(const char* host, const unsigned char* ip4,
 			}
 		}
 
-		// Parse back what we are about to hand the TLS stack.  A certificate the
-		// server cannot use produces a bare "no usable ciphersuite" handshake
-		// failure with no indication of why, so check it here where the reason
-		// can actually be reported.
+		// Parse back what we are about to hand the TLS stack.  esp-tls reports an
+		// unusable certificate only as a generic handshake failure with no
+		// indication of why, so check it here where the reason can be reported.
+		//
+		// When reading those failures, note that the codes are easy to confuse:
+		//   -0x6980 NO_USABLE_CIPHERSUITE - our end has no suitable certificate
+		//   -0x7380 NO_CIPHER_CHOSEN      - no ciphersuite in common
+		//   -0x7780 FATAL_ALERT_MESSAGE   - the PEER rejected what we sent, which
+		//                                   is what a browser does when the user
+		//                                   has not accepted a self-signed cert
 		if (!cert_verify()) {
 			free(cert_buf); cert_buf = NULL;
 			free(key_buf);  key_buf = NULL;
@@ -443,8 +449,8 @@ static int build_san(unsigned char* out, size_t out_len)
 /**
  * Parse the certificate and key back and confirm they are usable as a TLS server
  * identity.  This is cheap insurance against a silent failure mode: if the stack
- * cannot use the certificate, the only symptom at handshake time is
- * MBEDTLS_ERR_SSL_NO_USABLE_CIPHERSUITE, which says nothing about the cause.
+ * cannot use the certificate, the only symptom at handshake time is a generic
+ * handshake failure that says nothing about the cause.
  */
 static bool cert_verify()
 {
