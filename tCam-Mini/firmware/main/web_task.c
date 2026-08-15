@@ -34,6 +34,7 @@
 #include "net_utilities.h"
 #include "wifi_utilities.h"
 #include "system_config.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_http_server.h"
 #include "esp_https_server.h"
@@ -98,16 +99,38 @@ void web_task()
 		vTaskDelay(pdMS_TO_TICKS(500));
 	}
 
-	if (!start_webserver()) {
-		ESP_LOGE(TAG, "Could not start web server");
-		vTaskDelete(NULL);
-		return;
+	// Internal heap is the scarce resource here - task stacks and socket buffers
+	// must come from it.  Log it so a failure to start leaves a diagnosable trail.
+	ESP_LOGI(TAG, "Internal heap: %d free, largest block %d",
+	         heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+	         heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+
+	// Retry startup a few times: right after a WPA3 association the supplicant's
+	// handshake allocations can still be in flight, and a moment later the same
+	// start succeeds.  Persistent failure is a real fault.
+	{
+		int attempt = 0;
+
+		while (!start_webserver()) {
+			if (++attempt >= 5) {
+				ESP_LOGE(TAG, "Could not start web server after %d attempts", attempt);
+				ctrl_set_fault_type(CTRL_FAULT_NETWORK);
+				vTaskDelete(NULL);
+				return;
+			}
+			ESP_LOGE(TAG, "Web server start failed - retrying");
+			vTaskDelay(pdMS_TO_TICKS(2000));
+		}
 	}
 
 	// TLS alongside plain HTTP.  HTTP must stay primary: captive portal probes are
 	// HTTP, and a forced redirect to a self-signed HTTPS page traps phones in a
 	// portal mini-browser that cannot accept the certificate.
 	start_https_server();
+
+	ESP_LOGI(TAG, "Internal heap after server start: %d free, largest block %d",
+	         heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+	         heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
 
 	// Only hijack DNS while we are the access point.  On someone else's network
 	// there is a real resolver and answering for every name would be hostile.
@@ -223,7 +246,8 @@ static void start_https_server()
 	conf.prvtkey_len = key_len;
 
 	conf.httpd.ctrl_port         = 32769;              // distinct from the HTTP instance
-	conf.httpd.max_open_sockets  = 3;                  // each TLS session costs ~45 KB
+	conf.httpd.max_open_sockets  = 2;                  // TLS sessions are expensive; one
+	                                                   // viewer plus one spare is plenty
 	conf.httpd.lru_purge_enable  = true;
 	conf.httpd.uri_match_fn      = httpd_uri_match_wildcard;
 	conf.httpd.recv_wait_timeout = 15;

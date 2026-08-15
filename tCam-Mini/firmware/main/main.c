@@ -102,11 +102,9 @@ void app_main(void)
 
     	// Serves the on-camera UI.  Runs at a low priority so that neither the
     	// lepton VoSPI transfer nor the response path can be starved by a browser.
-    	// The large stack is required: first-boot TLS certificate generation runs
-    	// mbedTLS ECDSA signing in this task's context, and EC point math uses
-    	// several KB of stack temporaries.  At 3072 it overflowed and corrupted
-    	// neighboring memory, crashing in random places inside the crypto library.
-    	xTaskCreatePinnedToCore(&web_task, "web_task",  10240, NULL, 1, &task_handle_web,  0);
+    	// Certificate generation, which needs a large stack for ECDSA math, runs in
+    	// its own short-lived task (see cert_utilities) rather than here.
+    	xTaskCreatePinnedToCore(&web_task, "web_task",  4096, NULL, 1, &task_handle_web,  0);
     }
 
 #ifdef INCLUDE_SYS_MON

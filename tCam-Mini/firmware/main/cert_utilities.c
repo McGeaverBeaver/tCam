@@ -31,6 +31,9 @@
 #include "mbedtls/entropy.h"
 #include "mbedtls/pk.h"
 #include "mbedtls/x509_crt.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+#include "freertos/task.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -52,6 +55,12 @@
 #define CERT_NOT_AFTER  "20500101000000"
 
 #define CERT_SUBJECT "CN=tCam-Mini,O=tCam"
+
+// Stack for the temporary generation task.  mbedTLS EC point multiplication uses
+// several KB of stack temporaries; running it on a caller's (smaller) stack
+// overflowed and corrupted memory.  This task exists only for the second or so
+// that generation takes and its stack is returned to the heap when it exits.
+#define CERT_GEN_TASK_STACK 12288
 
 
 //
@@ -76,13 +85,43 @@ static bool cert_store_to_nvs();
 //
 // Cert Utilities API
 //
+// Handshake between cert_get and the temporary generation task
+static SemaphoreHandle_t gen_done_sem = NULL;
+static volatile bool gen_result = false;
+
+static void cert_gen_task(void* arg)
+{
+	gen_result = cert_generate();
+	xSemaphoreGive(gen_done_sem);
+	vTaskDelete(NULL);
+}
+
+
 bool cert_get(const unsigned char** cert_pem, size_t* cert_len,
               const unsigned char** key_pem, size_t* key_len)
 {
 	if (cert_buf == NULL) {
 		if (!cert_load_from_nvs()) {
 			ESP_LOGI(TAG, "No stored certificate - generating (this happens once)");
-			if (!cert_generate()) {
+
+			// Run generation on a dedicated task with a stack sized for EC math,
+			// then reclaim it - callers keep their small permanent stacks
+			gen_done_sem = xSemaphoreCreateBinary();
+			if (gen_done_sem == NULL) return false;
+
+			if (xTaskCreatePinnedToCore(&cert_gen_task, "cert_gen", CERT_GEN_TASK_STACK,
+			                            NULL, 1, NULL, 0) != pdPASS) {
+				ESP_LOGE(TAG, "Could not start generation task");
+				vSemaphoreDelete(gen_done_sem);
+				gen_done_sem = NULL;
+				return false;
+			}
+
+			(void) xSemaphoreTake(gen_done_sem, portMAX_DELAY);
+			vSemaphoreDelete(gen_done_sem);
+			gen_done_sem = NULL;
+
+			if (!gen_result) {
 				return false;
 			}
 			if (!cert_store_to_nvs()) {
