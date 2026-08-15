@@ -63,12 +63,16 @@ static const char* TAG = "lep_task";
 static int lep_brd_type;
 static int lep_if_type;
 
+// Handle used by the vsync ISR to wake the task
+static TaskHandle_t lep_task_handle = NULL;
+
 
 
 //
 // LEP Task Forward Declarations for internal functions
 //
-static bool wait_for_vsync(int vsync_pin);
+static void IRAM_ATTR vsync_isr(void* arg);
+static bool wait_for_vsync();
 
 
 
@@ -116,6 +120,15 @@ void lep_task()
 		vTaskDelete(NULL);
 	}
 
+	// Arm a rising-edge interrupt on vsync.  The ISR wakes this task with a
+	// notification, so between frames the task is blocked rather than spinning
+	// on the GPIO at high priority - which used to consume an entire core and,
+	// when the sensor was absent, starve the idle task into the watchdog.
+	lep_task_handle = xTaskGetCurrentTaskHandle();
+	gpio_install_isr_service(0);
+	gpio_set_intr_type((gpio_num_t) lep_vsync_pin, GPIO_INTR_POSEDGE);
+	gpio_isr_handler_add((gpio_num_t) lep_vsync_pin, vsync_isr, NULL);
+
 	while (true) {
 		switch (task_state) {
 			case STATE_INIT:  // After power-on reset
@@ -132,10 +145,9 @@ void lep_task()
 				break;
 			
 			case STATE_RUN:   // Initialized and running
-				// Wait for vsync to be asserted.  This is deliberately a busy-wait
-				// because the VoSPI segment has to be read promptly once vsync goes
-				// high, but it is now bounded - see wait_for_vsync().
-				if (!wait_for_vsync(lep_vsync_pin)) {
+				// Block until the vsync ISR signals a frame edge (or time out if
+				// the line never asserts) - see wait_for_vsync()
+				if (!wait_for_vsync()) {
 					if (++vsync_timeout_count >= LEP_VSYNC_TIMEOUT_FAULT_LIMIT) {
 						vsync_timeout_count = LEP_VSYNC_TIMEOUT_FAULT_LIMIT;
 						ESP_LOGE(TAG, "No vsync from Lepton - check that the sensor is seated");
@@ -267,31 +279,35 @@ void lep_task()
 //
 
 /**
- * Spin until the Lepton asserts vsync, or until LEP_VSYNC_TIMEOUT_USEC elapses.
+ * Wake the lepton task on a vsync rising edge
+ */
+static void IRAM_ATTR vsync_isr(void* arg)
+{
+	BaseType_t higher_prio_woken = pdFALSE;
+
+	vTaskNotifyGiveFromISR(lep_task_handle, &higher_prio_woken);
+	portYIELD_FROM_ISR(higher_prio_woken);
+}
+
+
+/**
+ * Block until the next vsync rising edge, or until LEP_VSYNC_TIMEOUT_USEC elapses.
  * Returns true if vsync was seen.
  *
- * The wait is a busy loop on purpose - the VoSPI segment must be read very soon
- * after vsync rises, and sleeping here costs frames.  The deadline is only checked
- * every 256 iterations so the common path stays tight; the cost of noticing a real
- * timeout a few microseconds late is irrelevant next to the 250 mSec budget.
+ * Edges that occurred while the task was busy (transferring the previous segment,
+ * or sleeping after a completed frame) are drained first so this waits for the
+ * NEXT edge, matching the level-poll semantics of the original code.  The VoSPI
+ * resynchronization logic tolerates the few microseconds of ISR-to-task latency -
+ * it already hunts for the start of valid segment data on every transfer.
  *
- * Before this was bounded, a camera whose vsync line never asserted (an unseated
- * sensor, a broken trace, a Lepton left in the wrong GPIO mode) would spin here at
- * priority 19 forever, starve the idle task on that core and trip the task
- * watchdog every five seconds with no usable diagnostic.
+ * A camera whose vsync line never asserts (an unseated sensor, a broken trace, a
+ * Lepton left in the wrong GPIO mode) simply times out here, with the task blocked
+ * rather than spinning, and the caller raises a fault the user can act on.
  */
-static bool wait_for_vsync(int vsync_pin)
+static bool wait_for_vsync()
 {
-	int64_t start = esp_timer_get_time();
-	uint32_t spins = 0;
+	// Discard edges that arrived while we were away
+	(void) ulTaskNotifyTake(pdTRUE, 0);
 
-	while (gpio_get_level((gpio_num_t) vsync_pin) == 0) {
-		if ((++spins & 0xFF) == 0) {
-			if ((esp_timer_get_time() - start) > LEP_VSYNC_TIMEOUT_USEC) {
-				return false;
-			}
-		}
-	}
-
-	return true;
+	return (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(LEP_VSYNC_TIMEOUT_USEC / 1000)) != 0);
 }

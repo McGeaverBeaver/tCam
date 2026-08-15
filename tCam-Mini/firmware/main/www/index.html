@@ -4,8 +4,13 @@
 
   Served directly from the camera's flash.  Everything here runs in the browser:
   the camera ships raw 16-bit radiometric frames and this page does the palette
-  mapping, scaling and measurement.  That keeps the firmware side small and means
-  adding a palette or a readout costs no camera resources at all.
+  mapping, interpolation, scaling and measurement.  That keeps the firmware side
+  small and means adding a palette, a readout or a higher rendering resolution
+  costs no camera resources at all.
+
+  Design notes: the thermal stream owns the whole viewport; every control lives in
+  floating glass surfaces over it or in a slide-over panel, so nothing competes
+  with the image.  All colors come from the custom-property block below.
 
   Copyright 2020-2022 Dan Julio
   Licensed under the GNU General Public License v3 - see LICENSE in the repository.
@@ -15,311 +20,392 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="color-scheme" content="dark">
+<meta name="theme-color" content="#07090d">
 <title>tCam-Mini</title>
 <style>
 :root{
-  --bg:#0e1116; --panel:#161b22; --panel2:#1c232c; --line:#2a323d;
-  --fg:#e6edf3; --dim:#8b98a5; --accent:#ff8c42; --accent2:#4aa3ff;
-  --ok:#3fb950; --warn:#d29922; --err:#f85149;
+  --bg:#07090d;
+  --glass:rgba(16,20,28,.78);
+  --glass-brt:rgba(255,255,255,.06);
+  --line:rgba(255,255,255,.09);
+  --line-brt:rgba(255,255,255,.18);
+  --fg:#eef2f7;
+  --dim:#7e8b9c;
+  --accent:#ff7a1a;
+  --accent-soft:rgba(255,122,26,.14);
+  --cool:#39c4ff;
+  --hot:#ff5252;
+  --ok:#2fd067;
+  --warn:#e8b93c;
+  --err:#ff4d4a;
+  --r-lg:16px; --r-md:12px; --r-sm:8px;
+  --shadow:0 12px 40px rgba(0,0,0,.55);
 }
-*{box-sizing:border-box}
-html,body{margin:0;height:100%}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;height:100%;overflow:hidden}
 body{
   background:var(--bg); color:var(--fg);
-  font:14px/1.45 system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;
-  display:flex; flex-direction:column; overflow:hidden;
+  font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Inter,Helvetica,Arial,sans-serif;
   -webkit-text-size-adjust:100%;
 }
-header{
-  display:flex; align-items:center; gap:10px; padding:10px 14px;
-  background:var(--panel); border-bottom:1px solid var(--line); flex:none;
-}
-header h1{font-size:15px;margin:0;font-weight:600;letter-spacing:.2px}
-header .sub{color:var(--dim);font-size:12px}
-#dot{width:9px;height:9px;border-radius:50%;background:var(--err);flex:none;
-     box-shadow:0 0 0 3px rgba(248,81,73,.15)}
-#dot.on{background:var(--ok);box-shadow:0 0 0 3px rgba(63,185,80,.15)}
-#dot.busy{background:var(--warn);box-shadow:0 0 0 3px rgba(210,153,34,.15)}
-.spacer{flex:1}
 
-main{flex:1;display:flex;min-height:0}
-@media (max-width:820px){main{flex-direction:column}}
-
-/* ---- viewer ---- */
-#stage{flex:1;display:flex;flex-direction:column;min-width:0;min-height:0;background:#000}
-#canwrap{flex:1;position:relative;display:flex;align-items:center;justify-content:center;
-         min-height:0;overflow:hidden;touch-action:none}
-canvas{image-rendering:pixelated;max-width:100%;max-height:100%;display:block}
+/* ============================== stage ============================== */
+#stage{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;
+       background:radial-gradient(120% 90% at 50% 40%, #0c1017 0%, var(--bg) 70%)}
+#canwrap{position:relative;touch-action:none;line-height:0}
+canvas{display:block;image-rendering:pixelated;border-radius:10px;
+       box-shadow:0 0 0 1px var(--line), var(--shadow)}
 canvas.smooth{image-rendering:auto}
-#marks{position:absolute;inset:0;pointer-events:none}
-#readouts{
-  display:flex;gap:8px;padding:8px 12px;background:var(--panel);
-  border-top:1px solid var(--line);flex:none;overflow-x:auto;align-items:center
-}
-.stat{background:var(--panel2);border:1px solid var(--line);border-radius:7px;
-      padding:5px 10px;white-space:nowrap;flex:none}
-.stat b{display:block;font-size:10px;color:var(--dim);font-weight:600;
-        letter-spacing:.6px;text-transform:uppercase}
-.stat span{font-size:15px;font-variant-numeric:tabular-nums}
-.stat.spot span{color:var(--accent)}
-.stat.max span{color:#ff6b6b}
-.stat.min span{color:#4aa3ff}
+canvas.mirror{transform:scaleX(-1)}
+#marks{position:absolute;inset:0;pointer-events:none;overflow:visible}
 
-/* ---- panel ---- */
-#panel{width:340px;flex:none;background:var(--panel);border-left:1px solid var(--line);
-       display:flex;flex-direction:column;min-height:0}
-@media (max-width:820px){#panel{width:auto;border-left:none;border-top:1px solid var(--line);
-       max-height:47vh}}
-#tabs{display:flex;flex:none;border-bottom:1px solid var(--line)}
-#tabs button{flex:1;background:none;border:none;border-bottom:2px solid transparent;
-  color:var(--dim);padding:11px 4px;font:inherit;font-size:12px;font-weight:600;cursor:pointer}
-#tabs button.sel{color:var(--fg);border-bottom-color:var(--accent)}
-.tab{display:none;padding:14px;overflow-y:auto;flex:1;-webkit-overflow-scrolling:touch}
+/* ============================== chrome ============================== */
+.glass{background:var(--glass);border:1px solid var(--line);border-radius:var(--r-md);
+       backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px)}
+
+#topbar{position:fixed;top:12px;left:12px;right:12px;display:flex;align-items:center;
+        gap:12px;padding:8px 8px 8px 14px;z-index:20}
+#dot{width:8px;height:8px;border-radius:50%;background:var(--err);flex:none;
+     box-shadow:0 0 8px 1px rgba(248,81,73,.6);transition:.3s}
+#dot.on{background:var(--ok);box-shadow:0 0 8px 1px rgba(47,208,103,.6)}
+#dot.busy{background:var(--warn);box-shadow:0 0 8px 1px rgba(232,185,60,.6)}
+#idblock{min-width:0}
+#camname{font-size:14px;font-weight:650;letter-spacing:.2px;white-space:nowrap;
+         overflow:hidden;text-overflow:ellipsis}
+#substate{font-size:11px;color:var(--dim);white-space:nowrap}
+.spacer{flex:1}
+#fps{font-size:11px;color:var(--dim);font-variant-numeric:tabular-nums;white-space:nowrap}
+
+.tbtn{width:38px;height:38px;border:none;border-radius:10px;background:transparent;
+      color:var(--fg);cursor:pointer;display:inline-flex;align-items:center;
+      justify-content:center;flex:none;transition:background .15s,color .15s}
+.tbtn:hover{background:var(--glass-brt)}
+.tbtn.active{background:var(--accent-soft);color:var(--accent)}
+.tbtn svg{width:19px;height:19px;fill:none;stroke:currentColor;stroke-width:1.8;
+          stroke-linecap:round;stroke-linejoin:round}
+
+/* readout chips */
+#chips{position:fixed;left:12px;bottom:12px;display:flex;gap:8px;z-index:15;
+       flex-wrap:wrap;max-width:calc(100vw - 96px)}
+.chip{padding:7px 12px;border-radius:var(--r-md)}
+.chip b{display:block;font-size:9.5px;color:var(--dim);font-weight:650;
+        letter-spacing:.8px;text-transform:uppercase}
+.chip span{font-size:16px;font-weight:600;font-variant-numeric:tabular-nums}
+.chip.spot span{color:var(--accent)}
+.chip.max span{color:var(--hot)}
+.chip.min span{color:var(--cool)}
+
+/* vertical range scale */
+#scalebar{position:fixed;right:12px;top:50%;transform:translateY(-50%);z-index:15;
+          display:flex;flex-direction:column;align-items:center;gap:6px;padding:10px 8px}
+#scalegrad{width:10px;height:min(38vh,260px);border-radius:5px;border:1px solid var(--line)}
+#scalebar output{font-size:10.5px;color:var(--dim);font-variant-numeric:tabular-nums;
+                 writing-mode:horizontal-tb}
+#sHi{color:var(--fg)}
+
+/* ============================== panel ============================== */
+#panel{position:fixed;top:0;right:0;bottom:0;width:min(380px,100vw);z-index:30;
+       display:flex;flex-direction:column;border-radius:0;border-width:0 0 0 1px;
+       transform:translateX(105%);transition:transform .28s cubic-bezier(.32,.72,.28,1)}
+#panel.open{transform:none}
+#panelhead{display:flex;align-items:center;gap:6px;padding:12px 10px 10px 18px;flex:none}
+#panelhead h2{margin:0;font-size:15px;font-weight:650;flex:1}
+#tabs{display:flex;gap:4px;padding:0 14px;flex:none}
+#tabs button{flex:1;background:none;border:none;border-radius:9px;color:var(--dim);
+  padding:9px 2px;font:inherit;font-size:12px;font-weight:600;cursor:pointer;
+  transition:background .15s,color .15s}
+#tabs button.sel{color:var(--accent);background:var(--accent-soft)}
+.tab{display:none;padding:16px 18px 28px;overflow-y:auto;flex:1;
+     -webkit-overflow-scrolling:touch}
 .tab.sel{display:block}
 
-.row{margin-bottom:14px}
-.row>label{display:block;font-size:11px;color:var(--dim);margin-bottom:5px;
-           text-transform:uppercase;letter-spacing:.5px;font-weight:600}
+.sect{font-size:10px;font-weight:700;letter-spacing:1.1px;text-transform:uppercase;
+      color:var(--dim);margin:20px 0 10px}
+.sect:first-child{margin-top:2px}
+.row{margin-bottom:12px}
+label.lbl{display:block;font-size:12px;color:var(--dim);margin-bottom:6px}
 select,input[type=text],input[type=password],input[type=number]{
-  width:100%;background:var(--panel2);color:var(--fg);border:1px solid var(--line);
-  border-radius:7px;padding:9px;font:inherit}
+  width:100%;background:rgba(255,255,255,.05);color:var(--fg);
+  border:1px solid var(--line);border-radius:10px;padding:10px 11px;font:inherit;
+  outline:none;transition:border-color .15s}
+select:focus,input:focus{border-color:var(--accent)}
 input[type=range]{width:100%;accent-color:var(--accent)}
-button.btn{
-  background:var(--panel2);color:var(--fg);border:1px solid var(--line);border-radius:7px;
-  padding:10px 12px;font:inherit;cursor:pointer;width:100%}
-button.btn:hover:not(:disabled){border-color:var(--accent);color:var(--accent)}
-button.btn:disabled{opacity:.45;cursor:default}
-button.btn.pri{background:var(--accent);border-color:var(--accent);color:#0e1116;font-weight:600}
-button.btn.pri:hover:not(:disabled){color:#0e1116;filter:brightness(1.08)}
+.btn{background:rgba(255,255,255,.05);color:var(--fg);border:1px solid var(--line);
+     border-radius:10px;padding:11px 12px;font:inherit;font-weight:550;cursor:pointer;
+     width:100%;transition:border-color .15s,color .15s,background .15s}
+.btn:hover:not(:disabled){border-color:var(--accent);color:var(--accent)}
+.btn:disabled{opacity:.4;cursor:default}
+.btn.pri{background:var(--accent);border-color:var(--accent);color:#12060a;font-weight:650}
+.btn.pri:hover:not(:disabled){color:#12060a;filter:brightness(1.07)}
 .grid2{display:grid;grid-template-columns:1fr 1fr;gap:8px}
-.chk{display:flex;align-items:center;gap:9px;padding:7px 0;cursor:pointer}
+.seg{display:flex;background:rgba(255,255,255,.05);border:1px solid var(--line);
+     border-radius:10px;padding:3px;gap:3px}
+.seg button{flex:1;border:none;background:none;color:var(--dim);border-radius:8px;
+            padding:8px 4px;font:inherit;font-size:12.5px;font-weight:600;cursor:pointer}
+.seg button.sel{background:var(--accent);color:#12060a}
+.chk{display:flex;align-items:center;gap:10px;padding:8px 0;cursor:pointer}
 .chk input{width:17px;height:17px;accent-color:var(--accent);flex:none}
-.chk span{font-size:13px}
-.hint{font-size:11px;color:var(--dim);margin-top:6px;line-height:1.5}
-hr{border:none;border-top:1px solid var(--line);margin:16px 0}
-.kv{display:flex;justify-content:space-between;gap:10px;padding:5px 0;font-size:13px;
+.hint{font-size:11.5px;color:var(--dim);margin-top:6px;line-height:1.5}
+.kv{display:flex;justify-content:space-between;gap:10px;padding:6px 0;font-size:13px;
     border-bottom:1px solid var(--line)}
 .kv span:first-child{color:var(--dim)}
 .kv span:last-child{font-variant-numeric:tabular-nums;text-align:right;word-break:break-all}
-#nets{max-height:190px;overflow-y:auto;border:1px solid var(--line);border-radius:7px}
-#nets div{padding:9px 10px;cursor:pointer;border-bottom:1px solid var(--line);
+#nets{max-height:180px;overflow-y:auto;border:1px solid var(--line);border-radius:10px}
+#nets div{padding:10px 12px;cursor:pointer;border-bottom:1px solid var(--line);
           display:flex;justify-content:space-between;gap:8px;font-size:13px}
 #nets div:last-child{border-bottom:none}
-#nets div:hover{background:var(--panel2)}
-#nets div.sel{background:var(--panel2);color:var(--accent)}
+#nets div:hover{background:rgba(255,255,255,.05)}
+#nets div.sel{color:var(--accent);background:var(--accent-soft)}
 #nets small{color:var(--dim)}
-#toast{
-  position:fixed;left:50%;bottom:22px;transform:translateX(-50%) translateY(80px);
-  background:var(--panel2);border:1px solid var(--line);border-radius:9px;
-  padding:11px 17px;font-size:13px;opacity:0;transition:.25s;pointer-events:none;
-  max-width:88vw;z-index:50;box-shadow:0 6px 24px rgba(0,0,0,.5)
-}
-#toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
-#toast.err{border-color:var(--err);color:#ffb3ae}
-#toast.ok{border-color:var(--ok)}
-#bar{height:5px;background:var(--panel2);border-radius:3px;overflow:hidden;margin-top:9px;display:none}
+#bar{height:5px;background:rgba(255,255,255,.07);border-radius:3px;overflow:hidden;
+     margin-top:10px;display:none}
 #bar div{height:100%;width:0;background:var(--accent);transition:width .2s}
-#scale{height:13px;border-radius:3px;margin-top:9px;border:1px solid var(--line)}
-.scalelbl{display:flex;justify-content:space-between;font-size:11px;color:var(--dim);margin-top:3px;
-          font-variant-numeric:tabular-nums}
+
+#toast{position:fixed;left:50%;bottom:20px;transform:translateX(-50%) translateY(90px);
+  padding:11px 18px;font-size:13px;opacity:0;transition:.28s;pointer-events:none;
+  max-width:88vw;z-index:60;border-radius:var(--r-md)}
+#toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+#toast.err{border-color:var(--err);color:#ffb9b6}
+#toast.ok{border-color:var(--ok)}
+
+@media (max-width:640px){
+  #panel{width:100vw;border-width:1px 0 0 0}
+  #scalebar{display:none}
+  .chip span{font-size:14px}
+}
 </style>
 </head>
 <body>
 
-<header>
+<div id="stage">
+  <div id="canwrap">
+    <canvas id="cv" width="160" height="120"></canvas>
+    <svg id="marks"></svg>
+  </div>
+</div>
+
+<header id="topbar" class="glass">
   <div id="dot"></div>
-  <div>
-    <h1 id="camname">tCam-Mini</h1>
-    <div class="sub" id="substate">connecting&hellip;</div>
+  <div id="idblock">
+    <div id="camname">tCam-Mini</div>
+    <div id="substate">connecting&hellip;</div>
   </div>
   <div class="spacer"></div>
-  <div class="sub" id="fps">&mdash;</div>
+  <div id="fps">&mdash;</div>
+  <button class="tbtn" id="bPlay" title="Pause / resume stream">
+    <svg viewBox="0 0 24 24"><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></svg>
+  </button>
+  <button class="tbtn" id="bShot" title="Save PNG">
+    <svg viewBox="0 0 24 24"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.4"/></svg>
+  </button>
+  <button class="tbtn" id="bFfc" title="Run flat field correction">
+    <svg viewBox="0 0 24 24"><path d="M12 3v4M12 17v4M3 12h4M17 12h4"/><circle cx="12" cy="12" r="3.2"/></svg>
+  </button>
+  <button class="tbtn" id="bFull" title="Fullscreen">
+    <svg viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>
+  </button>
+  <button class="tbtn" id="bPanel" title="Settings">
+    <svg viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/><circle cx="9" cy="7" r="1.9" fill="var(--bg)"/><circle cx="15" cy="12" r="1.9" fill="var(--bg)"/><circle cx="7" cy="17" r="1.9" fill="var(--bg)"/></svg>
+  </button>
 </header>
 
-<main>
-  <div id="stage">
-    <div id="canwrap">
-      <canvas id="cv" width="160" height="120"></canvas>
-      <svg id="marks"></svg>
+<div id="chips">
+  <div class="chip glass spot"><b>Spot</b><span id="rSpot">--</span></div>
+  <div class="chip glass max"><b>Max</b><span id="rMax">--</span></div>
+  <div class="chip glass min"><b>Min</b><span id="rMin">--</span></div>
+  <div class="chip glass" id="probeChip" style="display:none"><b>Probe</b><span id="rProbe">--</span></div>
+</div>
+
+<div id="scalebar" class="glass">
+  <output id="sHi">--</output>
+  <div id="scalegrad"></div>
+  <output id="sLo">--</output>
+</div>
+
+<aside id="panel" class="glass">
+  <div id="panelhead">
+    <h2>Settings</h2>
+    <button class="tbtn" id="bClose" title="Close">
+      <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg>
+    </button>
+  </div>
+  <nav id="tabs">
+    <button data-t="view" class="sel">Display</button>
+    <button data-t="cam">Camera</button>
+    <button data-t="net">Network</button>
+    <button data-t="sys">System</button>
+  </nav>
+
+  <!-- DISPLAY -->
+  <div class="tab sel" id="t-view">
+    <div class="sect">Palette</div>
+    <div class="row"><select id="pal"></select></div>
+
+    <div class="sect">Resolution</div>
+    <div class="row">
+      <div class="seg" id="segRes">
+        <button data-s="1">160&times;120</button>
+        <button data-s="2" class="sel">320&times;240</button>
+        <button data-s="4">640&times;480</button>
+      </div>
+      <div class="hint">The sensor is 160&times;120; higher settings interpolate the thermal
+        data bilinearly before coloring, like the desktop application. Saved PNGs use the
+        selected resolution.</div>
     </div>
-    <div id="readouts">
-      <div class="stat spot"><b>Spot</b><span id="rSpot">--</span></div>
-      <div class="stat max"><b>Max</b><span id="rMax">--</span></div>
-      <div class="stat min"><b>Min</b><span id="rMin">--</span></div>
-      <div class="stat"><b>Probe</b><span id="rProbe">--</span></div>
-      <div class="stat"><b>FPA</b><span id="rFpa">--</span></div>
+    <label class="chk"><input type="checkbox" id="oSmooth"><span>Smooth display scaling</span></label>
+    <label class="chk"><input type="checkbox" id="oMirror"><span>Mirror horizontally</span></label>
+
+    <div class="sect">Temperature range</div>
+    <label class="chk"><input type="checkbox" id="auto" checked><span>Auto range</span></label>
+    <div class="grid2" id="manual" style="display:none">
+      <input type="number" id="rlo" placeholder="min °" step="0.5">
+      <input type="number" id="rhi" placeholder="max °" step="0.5">
+    </div>
+    <div class="row" style="margin-top:8px">
+      <button class="btn" id="lockRange">Lock current range</button>
+      <div class="hint">Auto range tracks the scene, smoothed to avoid flicker. Locking copies
+        the current span into manual limits — useful to watch one thing heat up.</div>
+    </div>
+
+    <div class="sect">Cursor</div>
+    <div class="row">
+      <div class="seg" id="segCur">
+        <button data-m="probe" class="sel">Probe</button>
+        <button data-m="spot">Move spot</button>
+      </div>
+      <div class="hint">Probe reads the tapped pixel on this screen only. Move spot repositions
+        the camera's own spot meter, which is measured by the sensor itself.</div>
+    </div>
+    <label class="chk"><input type="checkbox" id="oSpot" checked><span>Show spot marker</span></label>
+    <label class="chk"><input type="checkbox" id="oMinMax" checked><span>Show hot / cold markers</span></label>
+
+    <div class="sect">Units</div>
+    <div class="row">
+      <div class="seg" id="segUnits">
+        <button data-u="C" class="sel">&deg;C</button>
+        <button data-u="F">&deg;F</button>
+      </div>
     </div>
   </div>
 
-  <div id="panel">
-    <div id="tabs">
-      <button data-t="view" class="sel">View</button>
-      <button data-t="cam">Camera</button>
-      <button data-t="net">Network</button>
-      <button data-t="sys">System</button>
+  <!-- CAMERA -->
+  <div class="tab" id="t-cam">
+    <div class="sect">Stream</div>
+    <div class="row">
+      <label class="lbl">Frame interval &mdash; <span id="fiLbl">as fast as possible</span></label>
+      <input type="range" id="fi" min="0" max="2000" step="50" value="0">
+      <div class="hint">Every frame is about 53&nbsp;KB. Slowing the interval is the most
+        effective way to keep a marginal WiFi link stable.</div>
     </div>
 
-    <!-- VIEW -->
-    <div class="tab sel" id="t-view">
-      <div class="row">
-        <label>Palette</label>
-        <select id="pal"></select>
-        <div id="scale"></div>
-        <div class="scalelbl"><span id="sLo">--</span><span id="sHi">--</span></div>
-      </div>
-      <div class="row">
-        <label>Range</label>
-        <label class="chk"><input type="checkbox" id="auto" checked><span>Auto range</span></label>
-        <div class="grid2" id="manual" style="display:none">
-          <input type="number" id="rlo" placeholder="min &deg;" step="0.5">
-          <input type="number" id="rhi" placeholder="max &deg;" step="0.5">
-        </div>
-        <div class="hint">Auto range tracks the coldest and hottest pixels in view, smoothed so the
-          image does not flicker when something briefly enters the frame.</div>
-      </div>
-      <div class="row">
-        <label>Overlay</label>
-        <label class="chk"><input type="checkbox" id="oSpot" checked><span>Spot meter</span></label>
-        <label class="chk"><input type="checkbox" id="oMinMax" checked><span>Hot / cold markers</span></label>
-        <label class="chk"><input type="checkbox" id="oSmooth"><span>Smooth interpolation</span></label>
-        <label class="chk"><input type="checkbox" id="oMirror"><span>Mirror horizontally</span></label>
-      </div>
-      <div class="row">
-        <label>Units</label>
-        <div class="grid2">
-          <button class="btn" id="uC">Celsius</button>
-          <button class="btn" id="uF">Fahrenheit</button>
-        </div>
-      </div>
-      <hr>
-      <div class="row">
-        <label>Capture</label>
-        <div class="grid2">
-          <button class="btn" id="snapPng">Save PNG</button>
-          <button class="btn" id="snapRaw">Save raw</button>
-        </div>
-        <div class="hint">Raw saves the camera's own json frame, the same format the desktop
-          application writes, so existing analysis tools still read it.</div>
-      </div>
+    <div class="sect">Sensor</div>
+    <div class="row">
+      <label class="lbl">Gain mode</label>
+      <select id="gain">
+        <option value="0">High (&minus;10 to 140 &deg;C)</option>
+        <option value="1">Low (&minus;10 to 450 &deg;C)</option>
+        <option value="2">Auto</option>
+      </select>
+    </div>
+    <div class="row">
+      <label class="lbl">Emissivity &mdash; <span id="emLbl">100%</span></label>
+      <input type="range" id="em" min="1" max="100" step="1" value="100">
+      <div class="hint">Polished metal is nearer 10&ndash;30%; painted or organic surfaces
+        nearer 90&ndash;98%.</div>
+    </div>
+    <label class="chk"><input type="checkbox" id="agc"><span>AGC (display contrast mode)</span></label>
+    <div class="hint">AGC gives a higher-contrast picture but pixels stop being temperatures,
+      so all readouts pause while it is on.</div>
+    <div class="row" style="margin-top:10px">
+      <button class="btn pri" id="applyCam">Apply sensor settings</button>
+    </div>
+    <div class="row">
+      <button class="btn" id="ffcBtn">Run flat field correction</button>
     </div>
 
-    <!-- CAMERA -->
-    <div class="tab" id="t-cam">
-      <div class="row">
-        <label>Stream</label>
-        <div class="grid2">
-          <button class="btn pri" id="streamBtn">Stop</button>
-          <button class="btn" id="ffcBtn">Run FFC</button>
-        </div>
-      </div>
-      <div class="row">
-        <label>Frame interval &mdash; <span id="fiLbl">as fast as possible</span></label>
-        <input type="range" id="fi" min="0" max="2000" step="50" value="0">
-        <div class="hint">Every frame is about 53&nbsp;KB of json. Slowing the interval is the
-          single most effective way to keep a marginal WiFi link stable.</div>
-      </div>
-      <hr>
-      <div class="row">
-        <label class="chk"><input type="checkbox" id="agc"><span>AGC enabled</span></label>
-        <div class="hint">AGC gives a higher contrast picture but the pixels stop being
-          temperatures, so the readouts above are disabled while it is on.</div>
-      </div>
-      <div class="row">
-        <label>Gain mode</label>
-        <select id="gain">
-          <option value="0">High (&minus;10 to 140 &deg;C)</option>
-          <option value="1">Low (&minus;10 to 450 &deg;C)</option>
-          <option value="2">Auto</option>
-        </select>
-      </div>
-      <div class="row">
-        <label>Emissivity &mdash; <span id="emLbl">100%</span></label>
-        <input type="range" id="em" min="1" max="100" step="1" value="100">
-        <div class="hint">Polished metal is nearer 10&ndash;30%, painted or organic surfaces
-          nearer 90&ndash;98%.</div>
-      </div>
-      <div class="row">
-        <button class="btn pri" id="applyCam">Apply camera settings</button>
-      </div>
+    <div class="sect">Telemetry</div>
+    <div class="kv"><span>FPA temperature</span><span id="tFpa">--</span></div>
+    <div class="kv"><span>Housing temperature</span><span id="tHouse">--</span></div>
+    <div class="kv"><span>Effective gain</span><span id="tGain">--</span></div>
+    <div class="kv"><span>Emissivity</span><span id="tEmis">--</span></div>
+    <div class="kv"><span>T-Linear resolution</span><span id="tRes">--</span></div>
+    <div class="kv"><span>Spot mean</span><span id="tSpot">--</span></div>
+    <div class="kv"><span>Frames received</span><span id="tFrames">0</span></div>
+
+    <div class="sect">Capture</div>
+    <div class="grid2">
+      <button class="btn" id="snapPng">Save PNG</button>
+      <button class="btn" id="snapRaw">Save raw</button>
+    </div>
+    <div class="hint">Raw saves the camera's own json frame (.tjsn), the same format the
+      desktop application writes, so existing analysis tools read it.</div>
+  </div>
+
+  <!-- NETWORK -->
+  <div class="tab" id="t-net">
+    <div class="sect">Camera identity</div>
+    <div class="row">
+      <label class="lbl">Camera name</label>
+      <input type="text" id="apssid" maxlength="32">
+      <div class="hint">Also the access point name and the mDNS hostname.</div>
     </div>
 
-    <!-- NETWORK -->
-    <div class="tab" id="t-net">
-      <div class="row">
-        <label>Camera name</label>
-        <input type="text" id="apssid" maxlength="32">
-        <div class="hint">Also the access point name and the mDNS hostname.</div>
-      </div>
-      <hr>
-      <div class="row">
-        <label>Join a network</label>
-        <button class="btn" id="scanBtn">Scan for networks</button>
-        <div id="nets" style="display:none;margin-top:9px"></div>
-      </div>
-      <div class="row">
-        <label>Network name</label>
-        <input type="text" id="stassid" maxlength="32" autocomplete="off">
-      </div>
-      <div class="row">
-        <label>Password</label>
-        <input type="password" id="stapw" maxlength="63" autocomplete="off">
-      </div>
-      <div class="row">
-        <label class="chk"><input type="checkbox" id="stamode"><span>Join this network at startup</span></label>
-        <div class="hint">Unchecked, the camera keeps broadcasting its own access point and you
-          connect straight to it. Checked, it joins your network and is reachable at
-          <b id="mdnsname">tcam-mini.local</b>.</div>
-      </div>
-      <div class="row">
-        <button class="btn pri" id="applyNet">Save and restart networking</button>
-        <div class="hint">If the camera cannot join the network it falls back to its own access
-          point, so a wrong password is recoverable without a cable.</div>
-      </div>
+    <div class="sect">Join a network</div>
+    <div class="row"><button class="btn" id="scanBtn">Scan for networks</button></div>
+    <div class="row" id="netsWrap" style="display:none"><div id="nets"></div></div>
+    <div class="row">
+      <label class="lbl">Network name</label>
+      <input type="text" id="stassid" maxlength="32" autocomplete="off">
     </div>
-
-    <!-- SYSTEM -->
-    <div class="tab" id="t-sys">
-      <div class="row">
-        <label>Camera</label>
-        <div class="kv"><span>Model</span><span id="iModel">--</span></div>
-        <div class="kv"><span>Firmware</span><span id="iVer">--</span></div>
-        <div class="kv"><span>Interface</span><span id="iIf">--</span></div>
-        <div class="kv"><span>Address</span><span id="iIp">--</span></div>
-        <div class="kv"><span>Sensor</span><span id="iLep">--</span></div>
-        <div class="kv"><span>Frames</span><span id="iFrames">0</span></div>
-      </div>
-      <hr>
-      <div class="row">
-        <label>Firmware update</label>
-        <input type="file" id="fw" accept=".bin" style="display:none">
-        <button class="btn" id="fwBtn">Choose firmware .bin&hellip;</button>
-        <div id="bar"><div></div></div>
-        <div class="hint">The camera writes to the spare application partition and only switches
-          to it once the whole image has been received and verified, so an interrupted update
-          leaves the current firmware running.</div>
-      </div>
-      <hr>
-      <div class="row">
-        <button class="btn" id="setTime">Set camera clock from this device</button>
-      </div>
+    <div class="row">
+      <label class="lbl">Password</label>
+      <input type="password" id="stapw" maxlength="63" autocomplete="off">
+    </div>
+    <label class="chk"><input type="checkbox" id="stamode"><span>Join this network at startup</span></label>
+    <div class="hint">Unchecked, the camera broadcasts its own access point and you connect
+      straight to it. Checked, it joins your network and is reachable at
+      <b id="mdnsname">tcam-mini.local</b>. If it cannot join it falls back to its own access
+      point, so a wrong password is recoverable without a cable.</div>
+    <div class="row" style="margin-top:12px">
+      <button class="btn pri" id="applyNet">Save and restart networking</button>
     </div>
   </div>
-</main>
 
-<div id="toast"></div>
+  <!-- SYSTEM -->
+  <div class="tab" id="t-sys">
+    <div class="sect">Camera</div>
+    <div class="kv"><span>Model</span><span id="iModel">--</span></div>
+    <div class="kv"><span>Firmware</span><span id="iVer">--</span></div>
+    <div class="kv"><span>Sensor</span><span id="iLep">--</span></div>
+    <div class="kv"><span>Interface</span><span id="iIf">--</span></div>
+    <div class="kv"><span>Address</span><span id="iIp">--</span></div>
+
+    <div class="sect">Firmware update</div>
+    <input type="file" id="fw" accept=".bin" style="display:none">
+    <div class="row"><button class="btn" id="fwBtn">Choose firmware .bin&hellip;</button></div>
+    <div id="bar"><div></div></div>
+    <div class="hint">The camera writes to the spare partition and only switches to it once the
+      whole image is received and verified — an interrupted update leaves the current firmware
+      running.</div>
+
+    <div class="sect">Clock</div>
+    <div class="row"><button class="btn" id="setTime">Set camera clock from this device</button></div>
+  </div>
+</aside>
+
+<div id="toast" class="glass"></div>
 
 <script>
 "use strict";
 (function(){
 
-// ---------------------------------------------------------------- constants
+/* ============================== constants ============================== */
 var W=160, H=120, NPIX=W*H;
 
-// Palette control points: [position 0-1, r, g, b]
 var PALETTES = {
   "Ironbow":[[0,0,0,0],[.2,40,0,90],[.4,140,20,110],[.6,220,80,50],[.8,255,180,20],[1,255,255,235]],
-  "Grey":[[0,0,0,0],[1,255,255,255]],
-  "Grey (inverted)":[[0,255,255,255],[1,0,0,0]],
+  "White hot":[[0,0,0,0],[1,255,255,255]],
+  "Black hot":[[0,255,255,255],[1,0,0,0]],
   "Rainbow":[[0,0,0,60],[.2,0,80,220],[.4,0,200,190],[.6,120,220,60],[.8,255,190,0],[1,255,40,20]],
   "Arctic":[[0,0,0,40],[.35,20,90,160],[.6,120,180,220],[.8,235,235,235],[1,255,220,120]],
   "Lava":[[0,10,0,20],[.3,120,0,60],[.6,230,60,20],[.85,255,180,40],[1,255,255,200]],
@@ -327,36 +413,37 @@ var PALETTES = {
   "Hot metal":[[0,0,0,0],[.25,110,0,0],[.5,220,60,0],[.75,255,175,0],[1,255,255,255]]
 };
 
-// ---------------------------------------------------------------- state
+/* ============================== state ============================== */
 var ws=null, wsOK=false, reconnectTimer=null;
 var cv=document.getElementById("cv"), ctx=cv.getContext("2d");
-var img=ctx.createImageData(W,H);
 var lut=new Uint8Array(256*3);
-var raw=null;               // Uint16Array of the most recent frame
-var lastJson=null;          // most recent frame as received, for "save raw"
-var res=0.01;               // T-Linear resolution
-var spotK=null, fpaC=null;  // camera-reported values
+var raw=null, lastJson=null;
+var norm8=new Uint8Array(NPIX);
+var scaleS=2, img=null, sx0=null, sx1=null, sfx=null, sy0=null, sy1=null, sfy=null;
+var res=0.01, spotK=null, fpaC=null, houseC=null, effGain=null, emisPct=null;
 var minV=0,maxV=0,minI=0,maxI=0;
-var rangeLo=null, rangeHi=null;   // smoothed auto-range, in raw counts
-var probe=null;                   // {x,y} in sensor pixels
+var rangeLo=null, rangeHi=null;
+var probe=null;                       // {x,y} sensor px
+var spotPos={x:79,y:59};              // camera spot ROI top-left (Lepton default is center)
+var cursorMode="probe";
 var useF=false, agcOn=false;
 var frames=0, fpsCount=0, fpsT=Date.now();
 var streaming=true;
-var info={};
 
-// ---------------------------------------------------------------- helpers
 function $(id){return document.getElementById(id);}
+var store={
+  get:function(k,d){ try{ var v=localStorage.getItem("tcam."+k); return v===null?d:v; }catch(e){ return d; } },
+  set:function(k,v){ try{ localStorage.setItem("tcam."+k,v); }catch(e){} }
+};
 
+/* ============================== helpers ============================== */
 function toast(msg,kind){
   var t=$("toast");
   t.textContent=msg;
-  t.className="show"+(kind?" "+kind:"");
+  t.className="glass show"+(kind?" "+kind:"");
   clearTimeout(t._h);
-  t._h=setTimeout(function(){t.className="";},3200);
+  t._h=setTimeout(function(){t.className="glass";},3200);
 }
-
-// Raw sensor count -> temperature. The Lepton reports Kelvin scaled by the
-// T-Linear resolution reported in telemetry.
 function toC(v){ return v*res-273.15; }
 function disp(c){ return useF ? c*9/5+32 : c; }
 function fmt(c){ return (c===null||c===undefined||isNaN(c)) ? "--"
@@ -370,17 +457,17 @@ function buildLut(name){
       if(p>=pts[j][0] && p<=pts[j+1][0]){ a=pts[j]; b=pts[j+1]; break; }
     }
     var span=b[0]-a[0], f=span>0?(p-a[0])/span:0;
-    lut[i*3]  =a[1]+(b[1]-a[1])*f;
-    lut[i*3+1]=a[2]+(b[2]-a[2])*f;
-    lut[i*3+2]=a[3]+(b[3]-a[3])*f;
+    lut[i*3]  =(a[1]+(b[1]-a[1])*f)|0;
+    lut[i*3+1]=(a[2]+(b[2]-a[2])*f)|0;
+    lut[i*3+2]=(a[3]+(b[3]-a[3])*f)|0;
   }
-  // colour bar under the palette selector
   var g=[], k;
   for(k=0;k<=10;k++){
     var idx=Math.round(k*25.5)*3;
     g.push("rgb("+lut[idx]+","+lut[idx+1]+","+lut[idx+2]+") "+(k*10)+"%");
   }
-  $("scale").style.background="linear-gradient(90deg,"+g.join(",")+")";
+  // vertical bar runs hot (top) to cold (bottom)
+  $("scalegrad").style.background="linear-gradient(0deg,"+g.join(",")+")";
 }
 
 function b64ToU8(b64){
@@ -389,12 +476,43 @@ function b64ToU8(b64){
   return out;
 }
 
-// ---------------------------------------------------------------- rendering
+/* Precompute bilinear sample maps for the current scale */
+function setScale(S){
+  scaleS=S;
+  var ow=W*S, oh=H*S, i, p, p0;
+  cv.width=ow; cv.height=oh;
+  img=ctx.createImageData(ow,oh);
+  sx0=new Uint16Array(ow); sx1=new Uint16Array(ow); sfx=new Float32Array(ow);
+  sy0=new Uint16Array(oh); sy1=new Uint16Array(oh); sfy=new Float32Array(oh);
+  for(i=0;i<ow;i++){
+    p=(i+0.5)/S-0.5; if(p<0)p=0; if(p>W-1)p=W-1;
+    p0=Math.floor(p); sx0[i]=p0; sx1[i]=(p0<W-1)?p0+1:p0; sfx[i]=p-p0;
+  }
+  for(i=0;i<oh;i++){
+    p=(i+0.5)/S-0.5; if(p<0)p=0; if(p>H-1)p=H-1;
+    p0=Math.floor(p); sy0[i]=p0; sy1[i]=(p0<H-1)?p0+1:p0; sfy[i]=p-p0;
+  }
+  fitCanvas();
+  render();
+}
+
+/* Size the canvas element to the viewport, preserving 4:3 */
+function fitCanvas(){
+  var availW=window.innerWidth-24, availH=window.innerHeight-24;
+  var w=availW, h=w*H/W;
+  if(h>availH){ h=availH; w=h*W/H; }
+  cv.style.width=w+"px"; cv.style.height=h+"px";
+  var m=$("marks");
+  m.style.width=w+"px"; m.style.height=h+"px";
+  m.setAttribute("viewBox","0 0 "+w+" "+h);
+  drawMarks();
+}
+
+/* ============================== rendering ============================== */
 function render(){
-  if(!raw) return;
+  if(!raw||!img) return;
   var i,v,lo,hi;
 
-  // find extremes
   minV=65535; maxV=0;
   for(i=0;i<NPIX;i++){
     v=raw[i];
@@ -403,8 +521,6 @@ function render(){
   }
 
   if($("auto").checked || agcOn){
-    // Exponential smoothing stops a momentary hot object from rescaling the
-    // whole image and making everything else go flat.
     if(rangeLo===null){ rangeLo=minV; rangeHi=maxV; }
     else{
       rangeLo += (minV-rangeLo)*0.2;
@@ -419,51 +535,74 @@ function render(){
   }
   if(hi-lo<1) hi=lo+1;
 
-  var scale=255/(hi-lo), d=img.data, i3, o=0;
+  // normalize raw counts to bytes once, then interpolate bytes - visually
+  // identical to interpolating 16-bit data and roughly 16x cheaper at 4x
+  var scale=255/(hi-lo);
   for(i=0;i<NPIX;i++){
     v=(raw[i]-lo)*scale;
-    v = v<0?0 : (v>255?255:v)|0;
-    i3=v*3;
-    d[o++]=lut[i3]; d[o++]=lut[i3+1]; d[o++]=lut[i3+2]; d[o++]=255;
+    norm8[i]= v<0?0 : (v>255?255:v|0);
+  }
+
+  var d=img.data, o=0, S=scaleS;
+  if(S===1){
+    for(i=0;i<NPIX;i++){
+      var i3=norm8[i]*3;
+      d[o++]=lut[i3]; d[o++]=lut[i3+1]; d[o++]=lut[i3+2]; d[o++]=255;
+    }
+  }else{
+    var ow=W*S, oh=H*S, x, y;
+    for(y=0;y<oh;y++){
+      var r0=sy0[y]*W, r1=sy1[y]*W, fy=sfy[y];
+      for(x=0;x<ow;x++){
+        var x0=sx0[x], x1=sx1[x], fx=sfx[x];
+        var t=norm8[r0+x0]+(norm8[r0+x1]-norm8[r0+x0])*fx;
+        var b=norm8[r1+x0]+(norm8[r1+x1]-norm8[r1+x0])*fx;
+        var j=((t+(b-t)*fy)|0)*3;
+        d[o++]=lut[j]; d[o++]=lut[j+1]; d[o++]=lut[j+2]; d[o++]=255;
+      }
+    }
   }
   ctx.putImageData(img,0,0);
 
-  $("sLo").textContent = agcOn?"AGC":fmt(toC(lo));
+  $("sLo").textContent = agcOn?"AGC":fmt(toC(lo)).replace("°C","").replace("°F","");
   $("sHi").textContent = agcOn?"":fmt(toC(hi));
   drawMarks();
   updateReadouts();
 }
 
-function drawMarks(){
-  var svg=$("marks");
-  var r=cv.getBoundingClientRect(), p=cv.parentNode.getBoundingClientRect();
-  var ox=r.left-p.left, oy=r.top-p.top, sx=r.width/W, sy=r.height/H;
-  var mir=$("oMirror").checked;
-  var out="";
+function sensorToScreen(x,y){
+  // sensor px -> css px inside the marks svg
+  var r=cv.getBoundingClientRect();
+  var mx=$("oMirror").checked ? (W-1-x) : x;
+  return {x:(mx+0.5)*r.width/W, y:(y+0.5)*r.height/H};
+}
 
-  function px(i){ var x=i%W; return ox+((mir?(W-1-x):x)+0.5)*sx; }
-  function py(i){ return oy+(Math.floor(i/W)+0.5)*sy; }
+function drawMarks(){
+  var svg=$("marks"), out="";
+  if(!raw){ svg.innerHTML=""; return; }
+
+  function cross(px,py,r,color,gap){
+    return '<g stroke="'+color+'" stroke-width="1.8" fill="none">'+
+      '<circle cx="'+px+'" cy="'+py+'" r="'+r+'"/>'+
+      '<line x1="'+(px-r-gap)+'" y1="'+py+'" x2="'+(px-gap)+'" y2="'+py+'"/>'+
+      '<line x1="'+(px+gap)+'" y1="'+py+'" x2="'+(px+r+gap)+'" y2="'+py+'"/>'+
+      '<line x1="'+px+'" y1="'+(py-r-gap)+'" x2="'+px+'" y2="'+(py-gap)+'"/>'+
+      '<line x1="'+px+'" y1="'+(py+gap)+'" x2="'+px+'" y2="'+(py+r+gap)+'"/></g>';
+  }
 
   if($("oMinMax").checked && !agcOn){
-    out+='<g stroke="#ff6b6b" stroke-width="1.6" fill="none"><circle cx="'+px(maxI)+'" cy="'+py(maxI)+'" r="7"/>'+
-         '<line x1="'+(px(maxI)-11)+'" y1="'+py(maxI)+'" x2="'+(px(maxI)-3)+'" y2="'+py(maxI)+'"/>'+
-         '<line x1="'+(px(maxI)+3)+'" y1="'+py(maxI)+'" x2="'+(px(maxI)+11)+'" y2="'+py(maxI)+'"/></g>';
-    out+='<g stroke="#4aa3ff" stroke-width="1.6" fill="none"><circle cx="'+px(minI)+'" cy="'+py(minI)+'" r="7"/>'+
-         '<line x1="'+px(minI)+'" y1="'+(py(minI)-11)+'" x2="'+px(minI)+'" y2="'+(py(minI)-3)+'"/>'+
-         '<line x1="'+px(minI)+'" y1="'+(py(minI)+3)+'" x2="'+px(minI)+'" y2="'+(py(minI)+11)+'"/></g>';
+    var pM=sensorToScreen(maxI%W, Math.floor(maxI/W));
+    var pm=sensorToScreen(minI%W, Math.floor(minI/W));
+    out+='<g stroke="#ff5252" stroke-width="1.7" fill="none"><circle cx="'+pM.x+'" cy="'+pM.y+'" r="7"/></g>';
+    out+='<g stroke="#39c4ff" stroke-width="1.7" fill="none"><circle cx="'+pm.x+'" cy="'+pm.y+'" r="7"/></g>';
   }
   if($("oSpot").checked){
-    var ci=(H/2|0)*W+(W/2|0);
-    out+='<g stroke="#ff8c42" stroke-width="1.8" fill="none"><circle cx="'+px(ci)+'" cy="'+py(ci)+'" r="9"/>'+
-         '<line x1="'+(px(ci)-14)+'" y1="'+py(ci)+'" x2="'+(px(ci)-4)+'" y2="'+py(ci)+'"/>'+
-         '<line x1="'+(px(ci)+4)+'" y1="'+py(ci)+'" x2="'+(px(ci)+14)+'" y2="'+py(ci)+'"/>'+
-         '<line x1="'+px(ci)+'" y1="'+(py(ci)-14)+'" x2="'+px(ci)+'" y2="'+(py(ci)-4)+'"/>'+
-         '<line x1="'+px(ci)+'" y1="'+(py(ci)+4)+'" x2="'+px(ci)+'" y2="'+(py(ci)+14)+'"/></g>';
+    var ps=sensorToScreen(spotPos.x, spotPos.y);
+    out+=cross(ps.x,ps.y,9,"#ff7a1a",4);
   }
   if(probe){
-    var pi=probe.y*W+probe.x;
-    out+='<g stroke="#ffffff" stroke-width="1.6" fill="none"><rect x="'+(px(pi)-7)+'" y="'+(py(pi)-7)+
-         '" width="14" height="14"/></g>';
+    var pp=sensorToScreen(probe.x,probe.y);
+    out+='<g stroke="#ffffff" stroke-width="1.6" fill="none"><rect x="'+(pp.x-7)+'" y="'+(pp.y-7)+'" width="14" height="14" rx="2"/></g>';
   }
   svg.innerHTML=out;
 }
@@ -472,16 +611,23 @@ function updateReadouts(){
   if(agcOn){
     $("rSpot").textContent=$("rMax").textContent=$("rMin").textContent=$("rProbe").textContent="AGC";
   }else{
-    $("rSpot").textContent = spotK!==null ? fmt(spotK*res-273.15) : fmt(toC(raw[(H/2|0)*W+(W/2|0)]));
+    $("rSpot").textContent = spotK!==null ? fmt(spotK*res-273.15)
+                                          : fmt(toC(raw[spotPos.y*W+spotPos.x]));
     $("rMax").textContent  = fmt(toC(maxV));
     $("rMin").textContent  = fmt(toC(minV));
     $("rProbe").textContent= probe ? fmt(toC(raw[probe.y*W+probe.x])) : "--";
   }
-  $("rFpa").textContent = fpaC!==null ? fmt(fpaC) : "--";
-  $("iFrames").textContent = frames;
+  $("probeChip").style.display = probe ? "" : "none";
+  $("tFrames").textContent = frames;
+  $("tFpa").textContent   = fmt(fpaC);
+  $("tHouse").textContent = fmt(houseC);
+  $("tGain").textContent  = effGain===null?"--":(effGain===0?"High":"Low");
+  $("tEmis").textContent  = emisPct===null?"--":emisPct.toFixed(0)+"%";
+  $("tRes").textContent   = res+" K/count";
+  $("tSpot").textContent  = spotK!==null?fmt(spotK*res-273.15):"--";
 }
 
-// ---------------------------------------------------------------- frames
+/* ============================== frames ============================== */
 function onImage(m){
   lastJson=m;
   var bytes=b64ToU8(m.radiometric);
@@ -490,21 +636,25 @@ function onImage(m){
   if(m.telemetry){
     var t=new Uint16Array(b64ToU8(m.telemetry).buffer);
     if(t.length>=240){
-      res   = (t[209]===0) ? 0.1 : 0.01;   // row C word 49
-      spotK = t[210];                       // row C word 50
-      fpaC  = t[24]/100-273.15;             // row A word 24
+      res    =(t[209]===0)?0.1:0.01;   // row C word 49
+      spotK  = t[210];                 // row C word 50
+      fpaC   = t[24]/100-273.15;       // row A word 24
+      houseC = t[26]/100-273.15;       // row A word 26
+      effGain= t[166];                 // row C word 6
+      emisPct= t[99]/8192*100;         // row B word 19
     }
   }
   frames++; fpsCount++;
   var now=Date.now();
   if(now-fpsT>=1000){
-    $("fps").textContent=(fpsCount*1000/(now-fpsT)).toFixed(1)+" fps";
+    $("fps").textContent=(fpsCount*1000/(now-fpsT)).toFixed(1)+" fps · "+
+                         (W*scaleS)+"×"+(H*scaleS);
     fpsCount=0; fpsT=now;
   }
   render();
 }
 
-// ---------------------------------------------------------------- transport
+/* ============================== transport ============================== */
 function send(cmd,args){
   if(!wsOK) return;
   var o={cmd:cmd};
@@ -527,13 +677,11 @@ function connect(){
   ws.onmessage=function(ev){
     var m;
     try{ m=JSON.parse(ev.data); }catch(e){ return; }
-
     if(m.radiometric){ onImage(m); return; }
     if(m.status)  { applyStatus(m.status); return; }
     if(m.config)  { applyConfig(m.config); return; }
     if(m.wifi)    { applyWifi(m.wifi); return; }
     if(m.cam_info){
-      // info_value 0 is a NACK; anything else is progress or debug chatter
       if(m.cam_info.info_value===0) toast(m.cam_info.info_string||"Command rejected","err");
       return;
     }
@@ -545,8 +693,7 @@ function connect(){
     $("substate").textContent="disconnected — retrying";
     scheduleReconnect();
   };
-
-  ws.onerror=function(){ /* close follows */ };
+  ws.onerror=function(){};
 }
 
 function scheduleReconnect(){
@@ -557,10 +704,6 @@ function scheduleReconnect(){
 function applyStatus(s){
   if(s.Camera){ $("camname").textContent=s.Camera; document.title=s.Camera; }
   $("iVer").textContent=s.Version||"--";
-
-  // "Model" is the capability mask, not a plain number:
-  //   bits  7:0  model number      bits  9:8  Lepton type
-  //   bits 13:12 interface type    bit  18    OTA update support
   if(s.Model!==undefined){
     var m=s.Model|0;
     $("iModel").textContent=(m & 0xFF);
@@ -581,8 +724,7 @@ function applyConfig(c){
   }
 }
 
-var netFlags=0x01;   // last flags byte reported by the camera
-
+var netFlags=0x01;
 function applyWifi(w){
   if(w.ap_ssid){
     $("apssid").value=w.ap_ssid;
@@ -592,21 +734,23 @@ function applyWifi(w){
   if(w.cur_ip_addr) $("iIp").textContent=w.cur_ip_addr;
   if(w.flags!==undefined){
     netFlags=w.flags|0;
-    // bit 7 selects station (client) mode, bit 0 enables WiFi at startup
     $("stamode").checked=!!(netFlags & 0x80);
   }
 }
 
 function setStream(on){
   streaming=on;
-  $("streamBtn").textContent=on?"Stop":"Start";
-  $("streamBtn").classList.toggle("pri",!on);
+  $("bPlay").innerHTML = on
+    ? '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></svg>'
+    : '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M8 5l11 7-11 7z"/></svg>';
   if(on) send("stream_on",{delay_msec:parseInt($("fi").value,10),num_frames:0});
   else   send("stream_off");
 }
 
-// ---------------------------------------------------------------- UI wiring
-// tabs
+/* ============================== UI wiring ============================== */
+// panel + tabs
+$("bPanel").onclick=function(){ $("panel").classList.add("open"); };
+$("bClose").onclick=function(){ $("panel").classList.remove("open"); };
 Array.prototype.forEach.call(document.querySelectorAll("#tabs button"),function(b){
   b.onclick=function(){
     Array.prototype.forEach.call(document.querySelectorAll("#tabs button"),function(x){x.classList.remove("sel");});
@@ -616,40 +760,79 @@ Array.prototype.forEach.call(document.querySelectorAll("#tabs button"),function(
   };
 });
 
+function segWire(id,attr,cb){
+  var seg=$(id);
+  Array.prototype.forEach.call(seg.children,function(b){
+    b.onclick=function(){
+      Array.prototype.forEach.call(seg.children,function(x){x.classList.remove("sel");});
+      b.classList.add("sel");
+      cb(b.dataset[attr]);
+    };
+  });
+}
+function segSet(id,attr,val){
+  Array.prototype.forEach.call($(id).children,function(b){
+    b.classList.toggle("sel", b.dataset[attr]===String(val));
+  });
+}
+
 // palette
 var sel=$("pal");
 Object.keys(PALETTES).forEach(function(n){
   var o=document.createElement("option"); o.value=o.textContent=n; sel.appendChild(o);
 });
-sel.value=localStorage.getItem("tcam.pal")||"Ironbow";
-sel.onchange=function(){ localStorage.setItem("tcam.pal",sel.value); buildLut(sel.value); render(); };
+sel.value=store.get("pal","Ironbow");
+if(!PALETTES[sel.value]) sel.value="Ironbow";
+sel.onchange=function(){ store.set("pal",sel.value); buildLut(sel.value); render(); };
 buildLut(sel.value);
 
+// resolution
+segWire("segRes","s",function(v){ store.set("res",v); setScale(parseInt(v,10)); });
+scaleS=parseInt(store.get("res","2"),10)||2;
+segSet("segRes","s",scaleS);
+
+// cursor mode
+segWire("segCur","m",function(v){ cursorMode=v; });
+
+// units
+segWire("segUnits","u",function(v){
+  useF=(v==="F"); store.set("f",useF?"1":""); render();
+});
+useF=store.get("f","")==="1";
+segSet("segUnits","u",useF?"F":"C");
+
+// display toggles
 $("auto").onchange=function(){
   $("manual").style.display=this.checked?"none":"grid";
   rangeLo=null;
   render();
 };
 $("rlo").oninput=$("rhi").oninput=render;
+$("lockRange").onclick=function(){
+  if(rangeLo===null||agcOn) return;
+  $("auto").checked=false;
+  $("manual").style.display="grid";
+  $("rlo").value=disp(toC(rangeLo)).toFixed(1);
+  $("rhi").value=disp(toC(rangeHi)).toFixed(1);
+  render();
+  toast("Range locked","ok");
+};
 $("oSpot").onchange=$("oMinMax").onchange=drawMarks;
 $("oMirror").onchange=function(){
-  cv.style.transform=this.checked?"scaleX(-1)":"";
+  store.set("mirror",this.checked?"1":"");
+  cv.classList.toggle("mirror",this.checked);
   drawMarks();
 };
-$("oSmooth").onchange=function(){ cv.classList.toggle("smooth",this.checked); };
+$("oMirror").checked=store.get("mirror","")==="1";
+cv.classList.toggle("mirror",$("oMirror").checked);
+$("oSmooth").onchange=function(){
+  store.set("smooth",this.checked?"1":"");
+  cv.classList.toggle("smooth",this.checked);
+};
+$("oSmooth").checked=store.get("smooth","")==="1";
+cv.classList.toggle("smooth",$("oSmooth").checked);
 
-function setUnits(f){
-  useF=f;
-  localStorage.setItem("tcam.f",f?"1":"");
-  $("uC").classList.toggle("pri",!f);
-  $("uF").classList.toggle("pri",f);
-  render();
-}
-$("uC").onclick=function(){setUnits(false);};
-$("uF").onclick=function(){setUnits(true);};
-setUnits(localStorage.getItem("tcam.f")==="1");
-
-// click / tap to place a probe point
+// canvas interaction: probe or spot placement
 $("canwrap").addEventListener("pointerdown",function(e){
   var r=cv.getBoundingClientRect();
   if(e.clientX<r.left||e.clientX>r.right||e.clientY<r.top||e.clientY>r.bottom) return;
@@ -657,20 +840,39 @@ $("canwrap").addEventListener("pointerdown",function(e){
   var y=Math.floor((e.clientY-r.top)/r.height*H);
   if($("oMirror").checked) x=W-1-x;
   x=Math.max(0,Math.min(W-1,x)); y=Math.max(0,Math.min(H-1,y));
-  probe=(probe && probe.x===x && probe.y===y)?null:{x:x,y:y};
+
+  if(cursorMode==="spot"){
+    // Reposition the camera's spot meter as a 2x2 ROI at the tapped pixel
+    var r1=Math.min(y,H-2), c1=Math.min(x,W-2);
+    send("set_spotmeter",{r1:r1,c1:c1,r2:r1+1,c2:c1+1});
+    spotPos={x:c1,y:r1};
+    toast("Spot meter moved","ok");
+  }else{
+    probe=(probe && probe.x===x && probe.y===y)?null:{x:x,y:y};
+  }
   drawMarks(); updateReadouts();
 });
 
-window.addEventListener("resize",drawMarks);
+window.addEventListener("resize",fitCanvas);
+
+// toolbar
+$("bPlay").onclick=function(){ setStream(!streaming); };
+$("bShot").onclick=snapPng;
+$("bFfc").onclick=function(){ send("run_ffc"); toast("Flat field correction requested"); };
+$("bFull").onclick=function(){
+  if(document.fullscreenElement){ document.exitFullscreen(); }
+  else if(document.documentElement.requestFullscreen){ document.documentElement.requestFullscreen(); }
+};
 
 // camera tab
-$("streamBtn").onclick=function(){ setStream(!streaming); };
-$("ffcBtn").onclick=function(){ send("run_ffc"); toast("Flat field correction requested"); };
 $("fi").oninput=function(){
   var v=parseInt(this.value,10);
   $("fiLbl").textContent = v===0 ? "as fast as possible" : v+" ms";
 };
-$("fi").onchange=function(){ if(streaming) setStream(true); };
+$("fi").onchange=function(){ store.set("fi",this.value); if(streaming) setStream(true); };
+$("fi").value=store.get("fi","0");
+$("fi").oninput();
+
 $("em").oninput=function(){ $("emLbl").textContent=this.value+"%"; };
 $("applyCam").onclick=function(){
   send("set_config",{
@@ -679,8 +881,9 @@ $("applyCam").onclick=function(){
     gain_mode:parseInt($("gain").value,10)
   });
   agcOn=$("agc").checked;
-  toast("Camera settings applied","ok");
+  toast("Sensor settings applied","ok");
 };
+$("ffcBtn").onclick=$("bFfc").onclick;
 
 // network tab
 $("scanBtn").onclick=function(){
@@ -702,30 +905,21 @@ $("scanBtn").onclick=function(){
       box.appendChild(el);
     });
     if(!box.children.length) box.innerHTML='<div><small>No networks found</small></div>';
-    box.style.display="block";
+    $("netsWrap").style.display="block";
   }).catch(function(){ toast("Scan failed","err"); })
   .then(function(){ b.disabled=false; b.textContent="Scan for networks"; });
 };
 
 $("applyNet").onclick=function(){
-  // Preserve every flag the camera already had (notably the static-IP bit) and
-  // only touch the two this form owns: WiFi enabled at startup, and station mode.
   var f=(netFlags | 0x01) & ~0x80;
   if($("stamode").checked) f|=0x80;
-
-  var args={
-    ap_ssid:$("apssid").value,
-    sta_ssid:$("stassid").value,
-    flags:f
-  };
+  var args={ ap_ssid:$("apssid").value, sta_ssid:$("stassid").value, flags:f };
   if($("stapw").value) args.sta_pw=$("stapw").value;
-
   if(f & 0x80){
     if(!args.sta_ssid){ toast("Enter a network name to join","err"); return; }
     if(!confirm("The camera will leave its own access point and join \""+args.sta_ssid+
                 "\".\n\nYou will need to reconnect this device to that network.")) return;
   }
-
   send("set_wifi",args);
   netFlags=f;
   toast("Saved — the camera is restarting its network","ok");
@@ -734,7 +928,6 @@ $("applyNet").onclick=function(){
 // system tab
 $("setTime").onclick=function(){
   var d=new Date();
-  // The camera stores the year as an offset from 1970, and the day of week 1-7
   send("set_time",{sec:d.getSeconds(),min:d.getMinutes(),hour:d.getHours(),
                    dow:d.getDay()+1,day:d.getDate(),mon:d.getMonth()+1,
                    year:d.getFullYear()-1970});
@@ -747,14 +940,10 @@ $("fw").onchange=function(){
   if(!f) return;
   if(!confirm("Update firmware with "+f.name+" ("+(f.size/1024).toFixed(0)+" KB)?\n\n"+
               "The camera will restart when it finishes.")) { this.value=""; return; }
-
-  // Stop streaming first so the upload is not competing with 53 KB frames
   setStream(false);
-
   var bar=$("bar"), fill=bar.firstElementChild;
   bar.style.display="block"; fill.style.width="0";
   $("fwBtn").disabled=true;
-
   var xhr=new XMLHttpRequest();
   xhr.open("POST","/api/ota");
   xhr.upload.onprogress=function(e){
@@ -780,47 +969,44 @@ $("fw").onchange=function(){
 };
 
 // capture
-$("snapPng").onclick=function(){
+function snapPng(){
   if(!raw){ toast("No frame yet","err"); return; }
-  // Render at 4x so the saved file is usable without further scaling
-  var s=4, c=document.createElement("canvas");
-  c.width=W*s; c.height=H*s;
+  var c=document.createElement("canvas");
+  c.width=cv.width; c.height=cv.height;
   var g=c.getContext("2d");
-  g.imageSmoothingEnabled=false;
+  g.imageSmoothingEnabled=$("oSmooth").checked;
   if($("oMirror").checked){ g.translate(c.width,0); g.scale(-1,1); }
-  g.drawImage(cv,0,0,c.width,c.height);
+  g.drawImage(cv,0,0);
   c.toBlob(function(b){ dl(b,"tcam-"+stamp()+".png"); });
-};
-
+}
+$("snapPng").onclick=snapPng;
 $("snapRaw").onclick=function(){
   if(!lastJson){ toast("No frame yet","err"); return; }
   dl(new Blob([JSON.stringify(lastJson)],{type:"application/json"}),
      "tcam-"+stamp()+".tjsn");
 };
-
 function stamp(){
   var d=new Date(), p=function(n){return (n<10?"0":"")+n;};
   return d.getFullYear()+p(d.getMonth()+1)+p(d.getDate())+"-"+
          p(d.getHours())+p(d.getMinutes())+p(d.getSeconds());
 }
-
 function dl(blob,name){
   var u=URL.createObjectURL(blob), a=document.createElement("a");
   a.href=u; a.download=name; a.click();
   setTimeout(function(){URL.revokeObjectURL(u);},2000);
 }
 
-// ---------------------------------------------------------------- boot
+/* ============================== boot ============================== */
 fetch("/api/status").then(function(r){return r.json();}).then(function(d){
-  info=d;
   if(d.camera){ $("camname").textContent=d.camera; document.title=d.camera; }
   $("iVer").textContent=d.version||"--";
-  $("iModel").textContent=d.model!==undefined?d.model:"--";
+  if(d.model!==undefined) $("iModel").textContent=d.model;
   $("iIf").textContent=d.interface||"--";
   $("iIp").textContent=d.ip||"--";
   if(d.mode==="ap") $("substate").textContent="access point mode";
 }).catch(function(){});
 
+setScale(scaleS);
 connect();
 
 })();

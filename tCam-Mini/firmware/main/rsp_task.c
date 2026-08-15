@@ -94,7 +94,9 @@ static char cmd_task_response_buffer[JSON_MAX_RSP_TEXT_LEN];
 // Firmware update control
 static char fw_update_version[UPD_MAX_VER_LEN+1];
 static int fw_update_state;
-static int fw_update_wait_timer;                // Counts down eval intervals waiting for some operation
+static int64_t fw_update_deadline_usec;         // Timeout deadline for the current fw update operation
+                                                // (a deadline rather than an iteration count because the
+                                                // task now wakes on notifications, not a fixed cadence)
 static int fw_req_length;
 static int fw_req_attempt_num;
 static int fw_cur_loc;
@@ -109,6 +111,7 @@ static int fw_seg_length;
 static void init_state();
 static void eval_stream_ready();
 static void handle_notifications();
+static void process_notifications(uint32_t notification_value);
 static int process_image(int n);
 static void send_response(char* rsp, int len, bool ser_mode);
 static bool cmd_response_available();
@@ -127,6 +130,7 @@ void rsp_task()
 	int len;
 	int brd_type;
 	int if_type;
+	uint32_t notification_value;
 	
 	ESP_LOGI(TAG, "Start task");
 	
@@ -218,7 +222,7 @@ void rsp_task()
 		
 		if (fw_update_state != FW_UPD_IDLE) {
 			// Look for timeout
-			if (--fw_update_wait_timer == 0) {
+			if (esp_timer_get_time() > fw_update_deadline_usec) {
 				if (fw_update_state == FW_UPD_REQUEST) {
 					// Request timed out without user confirming to start
 					xTaskNotify(task_handle_ctrl, CTRL_NOTIFY_FW_UPD_DONE, eSetBits);
@@ -229,7 +233,7 @@ void rsp_task()
 					if (++fw_req_attempt_num < FW_REQ_MAX_ATTEMPTS) {
 						// Request the segment again
 						send_get_fw();
-						fw_update_wait_timer = RSP_MAX_FW_UPD_GET_WAIT_MSEC / RSP_TASK_EVAL_NORM_MSEC;
+						fw_update_deadline_usec = esp_timer_get_time() + (RSP_MAX_FW_UPD_GET_WAIT_MSEC * 1000LL);
 						ESP_LOGI(TAG, "Retry chunk request");
 					} else {
 						// Give up
@@ -242,14 +246,16 @@ void rsp_task()
 				}
 			}
 		}
-		
-		// Sleep task - less if we are streaming
-		if (stream_on) {
-			vTaskDelay(pdMS_TO_TICKS(RSP_TASK_EVAL_FAST_MSEC));
-		} else {
-			vTaskDelay(pdMS_TO_TICKS(RSP_TASK_EVAL_NORM_MSEC));
+
+		// Wait for work.  A notification (a frame from lep_task, a command from the
+		// cmd task) wakes us immediately; otherwise we time out at the old polling
+		// cadence to service the periodic checks above.  This replaces a fixed
+		// vTaskDelay that added up to 50 mSec of latency to every frame sent.
+		if (xTaskNotifyWait(0x00, 0xFFFFFFFF, &notification_value,
+		                    pdMS_TO_TICKS(stream_on ? RSP_TASK_EVAL_FAST_MSEC : RSP_TASK_EVAL_NORM_MSEC))) {
+			process_notifications(notification_value);
 		}
-	} 
+	}
 }
 
 
@@ -362,9 +368,21 @@ static void eval_stream_ready()
 static void handle_notifications()
 {
 	uint32_t notification_value;
-	
+
 	notification_value = 0;
 	if (xTaskNotifyWait(0x00, 0xFFFFFFFF, &notification_value, 0)) {
+		process_notifications(notification_value);
+	}
+}
+
+
+/**
+ * Act on a set of notification bits.  Called both from the zero-timeout poll above
+ * and with bits returned by the blocking wait at the bottom of the task loop.
+ */
+static void process_notifications(uint32_t notification_value)
+{
+	{
 		//
 		// Handle cmd_task notifications
 		//
@@ -423,7 +441,7 @@ static void handle_notifications()
 			xTaskNotify(task_handle_ctrl, CTRL_NOTIFY_FW_UPD_REQ, eSetBits);
 			
 			// Set our state and a timer (for the user to allow the update)
-			fw_update_wait_timer = RSP_MAX_FW_UPD_REQ_WAIT_MSEC / RSP_TASK_EVAL_NORM_MSEC;
+			fw_update_deadline_usec = esp_timer_get_time() + (RSP_MAX_FW_UPD_REQ_WAIT_MSEC * 1000LL);
 			fw_update_state = FW_UPD_REQUEST;
 			
 			ESP_LOGI(TAG, "Request update to v%s : %d bytes", fw_update_version, fw_req_length);
@@ -457,7 +475,7 @@ static void handle_notifications()
 							// Request the next segment
 							fw_req_attempt_num = 0;
 							send_get_fw();
-							fw_update_wait_timer = RSP_MAX_FW_UPD_GET_WAIT_MSEC / RSP_TASK_EVAL_NORM_MSEC;
+							fw_update_deadline_usec = esp_timer_get_time() + (RSP_MAX_FW_UPD_GET_WAIT_MSEC * 1000LL);
 							ESP_LOGI(TAG, "Request fw chunk @ %d", fw_cur_loc);
 						}
 					} else {
@@ -484,7 +502,7 @@ static void handle_notifications()
 					fw_cur_loc = 0;
 					fw_req_attempt_num = 0;
 					send_get_fw();
-					fw_update_wait_timer = RSP_MAX_FW_UPD_GET_WAIT_MSEC / RSP_TASK_EVAL_NORM_MSEC;
+					fw_update_deadline_usec = esp_timer_get_time() + (RSP_MAX_FW_UPD_GET_WAIT_MSEC * 1000LL);
 					fw_update_state = FW_UPD_PROCESS;
 					
 					ESP_LOGI(TAG, "Start update");

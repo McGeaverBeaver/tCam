@@ -33,16 +33,25 @@ to its own access point, so a mistyped password does not need a cable to fix.
 
 ## What the interface does
 
+The thermal stream owns the whole viewport; controls live in floating glass
+surfaces and a slide-over settings panel.
+
 | Tab | Contents |
 | --- | --- |
-| View | Palette, temperature range, spot meter, hot/cold markers, units, PNG and raw capture |
-| Camera | Stream control and frame interval, FFC, AGC, gain mode, emissivity |
+| Display | Palette, output resolution (160/320/640, bilinear), range auto/manual/lock, cursor mode, markers, units |
+| Camera | Frame interval, gain mode, emissivity, AGC, FFC, live telemetry (FPA/housing temps, effective gain), PNG and raw capture |
 | Network | Camera name, network scan and join, startup mode |
 | System | Model and firmware information, firmware update, clock |
 
-Tap anywhere on the image to drop a probe point; tap it again to clear it.
+The toolbar over the stream has pause/resume, snapshot, FFC and fullscreen.
 
-**Save PNG** writes the image as displayed, upscaled 4×. **Save raw** writes the
+Tap the image to drop a probe point (tap again to clear), or switch the cursor to
+**Move spot** to reposition the camera's own spot meter — the reading measured by
+the sensor itself.
+
+The sensor is 160×120; the higher resolution settings interpolate the thermal data
+bilinearly in the browser before coloring, the same way the desktop application
+renders. **Save PNG** writes at the selected resolution. **Save raw** writes the
 camera's own json frame with the `.tjsn` extension — the same format the desktop
 application writes, so existing analysis tools still read it.
 
