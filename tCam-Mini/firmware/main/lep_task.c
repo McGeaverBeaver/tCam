@@ -66,6 +66,13 @@ static int lep_if_type;
 
 
 //
+// LEP Task Forward Declarations for internal functions
+//
+static bool wait_for_vsync(int vsync_pin);
+
+
+
+//
 // LEP Task API
 //
 
@@ -80,6 +87,7 @@ void lep_task()
 	int task_state = STATE_INIT;
 	int rsp_buf_index = 0;
 	int vsync_count = 0;
+	int vsync_timeout_count = 0;
 	int sync_fail_count = 0;
 	int reset_fail_count = 0;
 	int64_t vsyncDetectedUsec;
@@ -124,10 +132,21 @@ void lep_task()
 				break;
 			
 			case STATE_RUN:   // Initialized and running
-				// Spin waiting for vsync to be asserted
-				while (gpio_get_level((gpio_num_t) lep_vsync_pin) == 0) {
-//					vTaskDelay(pdMS_TO_TICKS(9));
+				// Wait for vsync to be asserted.  This is deliberately a busy-wait
+				// because the VoSPI segment has to be read promptly once vsync goes
+				// high, but it is now bounded - see wait_for_vsync().
+				if (!wait_for_vsync(lep_vsync_pin)) {
+					if (++vsync_timeout_count >= LEP_VSYNC_TIMEOUT_FAULT_LIMIT) {
+						vsync_timeout_count = LEP_VSYNC_TIMEOUT_FAULT_LIMIT;
+						ESP_LOGE(TAG, "No vsync from Lepton - check that the sensor is seated");
+						ctrl_set_fault_type(CTRL_FAULT_LEP_VOSPI);
+					}
+					// Yield so the rest of the system keeps running and the failure
+					// is reportable rather than taking the whole camera down
+					vTaskDelay(pdMS_TO_TICKS(100));
+					break;
 				}
+				vsync_timeout_count = 0;
 				vsyncDetectedUsec = esp_timer_get_time();
 				
 				// Attempt to process a segment
@@ -240,4 +259,39 @@ void lep_task()
 				task_state = STATE_RE_INIT;
 		}
 	}
+}
+
+
+//
+// LEP Task internal functions
+//
+
+/**
+ * Spin until the Lepton asserts vsync, or until LEP_VSYNC_TIMEOUT_USEC elapses.
+ * Returns true if vsync was seen.
+ *
+ * The wait is a busy loop on purpose - the VoSPI segment must be read very soon
+ * after vsync rises, and sleeping here costs frames.  The deadline is only checked
+ * every 256 iterations so the common path stays tight; the cost of noticing a real
+ * timeout a few microseconds late is irrelevant next to the 250 mSec budget.
+ *
+ * Before this was bounded, a camera whose vsync line never asserted (an unseated
+ * sensor, a broken trace, a Lepton left in the wrong GPIO mode) would spin here at
+ * priority 19 forever, starve the idle task on that core and trip the task
+ * watchdog every five seconds with no usable diagnostic.
+ */
+static bool wait_for_vsync(int vsync_pin)
+{
+	int64_t start = esp_timer_get_time();
+	uint32_t spins = 0;
+
+	while (gpio_get_level((gpio_num_t) vsync_pin) == 0) {
+		if ((++spins & 0xFF) == 0) {
+			if ((esp_timer_get_time() - start) > LEP_VSYNC_TIMEOUT_USEC) {
+				return false;
+			}
+		}
+	}
+
+	return true;
 }

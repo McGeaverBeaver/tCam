@@ -81,6 +81,7 @@ static int sta_retry_num = 0;
 static bool init_esp_wifi();
 static bool enable_esp_wifi_ap();
 static bool enable_esp_wifi_client();
+static bool sta_should_connect();
 static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data);
 static void ip_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data);
 
@@ -248,6 +249,18 @@ bool wifi_is_connected()
 bool wifi_is_ap_mode()
 {
 	return ((wifi_info.flags & NET_INFO_FLAG_CLIENT_MODE) == 0);
+}
+
+
+/**
+ * True when the station interface is meant to associate with an access point.
+ * False when it is only running so the web UI can scan.
+ */
+static bool sta_should_connect()
+{
+	if ((wifi_info.flags & NET_INFO_FLAG_CLIENT_MODE) == 0) return false;
+
+	return (strlen(wifi_info.sta_ssid) != 0);
 }
 
 
@@ -466,6 +479,14 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t e
 			break;
 			
 		case WIFI_EVENT_STA_START:
+			// While we are an access point the station interface exists only so the
+			// web UI can scan for networks - there is nothing to associate with.
+			// Calling esp_wifi_connect() with an empty SSID just fails, and any
+			// resulting disconnect event would start a pointless retry loop.
+			if (!sta_should_connect()) {
+				ESP_LOGI(TAG, "Station started (scan only)");
+				break;
+			}
 			ESP_LOGI(TAG, "Station started, trying to connect to %s", wifi_info.sta_ssid);
 			esp_wifi_connect();
 			sta_retry_num = 0;
@@ -485,6 +506,12 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t e
         	
         case WIFI_EVENT_STA_DISCONNECTED:
         	wifi_info.flags &= ~NET_INFO_FLAG_CONNECTED;
+        	// A scan-only station has nothing to reconnect to.  Retrying here would
+        	// spin the driver through connect/fail/connect as fast as it can, which
+        	// disturbs the access point we are actually serving.
+        	if (!sta_should_connect()) {
+        		break;
+        	}
         	if (sta_retry_num > WIFI_FAST_RECONNECT_ATTEMPTS) {
         		vTaskDelay(pdMS_TO_TICKS(1000));
         	} else {

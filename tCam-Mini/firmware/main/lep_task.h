@@ -41,6 +41,15 @@
 // Reset fail delay before attempting a re-init (seconds)
 #define LEP_RESET_FAIL_RETRY_SECS 60
 
+// Maximum time to spin waiting for vsync to assert (uSec).  In normal operation
+// vsync arrives roughly every 11 mSec, so this is far beyond any legitimate gap -
+// it exists only so that a camera whose vsync line never asserts reports a fault
+// instead of spinning until the task watchdog fires.
+#define LEP_VSYNC_TIMEOUT_USEC 250000
+
+// Consecutive vsync timeouts before reporting a fault
+#define LEP_VSYNC_TIMEOUT_FAULT_LIMIT 4
+
 
 
 //
