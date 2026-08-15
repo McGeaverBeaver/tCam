@@ -161,6 +161,22 @@ input[type=range]{width:100%;accent-color:var(--accent)}
      margin-top:10px;display:none}
 #bar div{height:100%;width:0;background:var(--accent);transition:width .2s}
 
+/* chrome auto-hide (fullscreen) */
+#topbar,#chips,#scalebar{transition:opacity .3s,transform .3s}
+body.hidechrome #topbar{opacity:0;transform:translateY(-10px);pointer-events:none}
+body.hidechrome #chips{opacity:0;transform:translateY(10px);pointer-events:none}
+body.hidechrome #scalebar{opacity:0;pointer-events:none}
+
+/* recording state */
+#recChip{display:none;align-items:center;gap:7px;padding:6px 11px;border-radius:9px;
+         font-size:12px;font-weight:650;font-variant-numeric:tabular-nums;color:#ffb9b6;
+         border:1px solid var(--err)}
+body.rec #recChip{display:flex}
+#recChip i{width:8px;height:8px;border-radius:50%;background:var(--err);
+           animation:recpulse 1.2s ease-in-out infinite}
+@keyframes recpulse{0%,100%{opacity:1}50%{opacity:.25}}
+body.rec #bRec{background:rgba(255,77,74,.15);color:var(--err)}
+
 #toast{position:fixed;left:50%;bottom:20px;transform:translateX(-50%) translateY(90px);
   padding:11px 18px;font-size:13px;opacity:0;transition:.28s;pointer-events:none;
   max-width:88vw;z-index:60;border-radius:var(--r-md)}
@@ -172,6 +188,7 @@ input[type=range]{width:100%;accent-color:var(--accent)}
   #panel{width:100vw;border-width:1px 0 0 0}
   #scalebar{display:none}
   .chip span{font-size:14px}
+  #fps,#bFfc{display:none}
 }
 </style>
 </head>
@@ -192,7 +209,14 @@ input[type=range]{width:100%;accent-color:var(--accent)}
   </div>
   <div class="spacer"></div>
   <div id="fps">&mdash;</div>
-  <button class="tbtn" id="bPlay" title="Pause / resume stream">
+  <div id="recChip"><i></i><span id="recTime">0:00</span></div>
+  <button class="tbtn active" id="bLayers" title="Include data overlay in captures (O)">
+    <svg viewBox="0 0 24 24"><path d="M12 4l8 4.5-8 4.5-8-4.5z"/><path d="M4 13l8 4.5 8-4.5"/></svg>
+  </button>
+  <button class="tbtn" id="bRec" title="Record video (R)">
+    <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="7"/><circle cx="12" cy="12" r="2.6" fill="currentColor" stroke="none"/></svg>
+  </button>
+  <button class="tbtn" id="bPlay" title="Pause / resume stream (Space)">
     <svg viewBox="0 0 24 24"><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></svg>
   </button>
   <button class="tbtn" id="bShot" title="Save PNG">
@@ -279,6 +303,14 @@ input[type=range]{width:100%;accent-color:var(--accent)}
     <label class="chk"><input type="checkbox" id="oSpot" checked><span>Show spot marker</span></label>
     <label class="chk"><input type="checkbox" id="oMinMax" checked><span>Show hot / cold markers</span></label>
 
+    <div class="sect">Isotherm alarm</div>
+    <label class="chk"><input type="checkbox" id="isoEn"><span>Highlight pixels above threshold</span></label>
+    <div class="row">
+      <input type="number" id="isoT" placeholder="threshold &deg;" step="1">
+      <div class="hint">Pixels at or above the threshold are painted in a fixed alarm color
+        regardless of palette — the fastest way to see "anything hotter than X" at a glance.</div>
+    </div>
+
     <div class="sect">Units</div>
     <div class="row">
       <div class="seg" id="segUnits">
@@ -286,6 +318,12 @@ input[type=range]{width:100%;accent-color:var(--accent)}
         <button data-u="F">&deg;F</button>
       </div>
     </div>
+
+    <div class="sect">Capture overlay</div>
+    <label class="chk"><input type="checkbox" id="ovCap" checked><span>Burn data overlay into captures</span></label>
+    <div class="hint">Applies to screenshots and recordings: camera name, timestamp, temperature
+      readouts, scale and markers. Toggle any time — including mid-recording — with the layers
+      button in the top bar or the O key.</div>
   </div>
 
   <!-- CAMERA -->
@@ -387,6 +425,15 @@ input[type=range]{width:100%;accent-color:var(--accent)}
     <div class="hint">The camera writes to the spare partition and only switches to it once the
       whole image is received and verified — an interrupted update leaves the current firmware
       running.</div>
+
+    <div class="sect">Security</div>
+    <div class="hint" id="tlsHint">The camera also serves this interface over HTTPS on port 443
+      with a certificate it generated for itself (valid to 2050). Your browser will warn once
+      per device because the certificate is self-signed — that is expected for a device with no
+      public name; accept it to continue.</div>
+    <div class="row" id="tlsLinkRow" style="display:none;margin-top:10px">
+      <button class="btn" id="tlsGo">Open the encrypted version</button>
+    </div>
 
     <div class="sect">Clock</div>
     <div class="row"><button class="btn" id="setTime">Set camera clock from this device</button></div>
@@ -496,17 +543,52 @@ function setScale(S){
   render();
 }
 
-/* Size the canvas element to the viewport, preserving 4:3 */
+/* Size the canvas element to the viewport, preserving 4:3.
+   The floating chrome is opaque enough to hide what it covers, so the stage
+   reserves space for it: below the top bar and above the readout chips.  When
+   the chrome auto-hides in fullscreen those reservations drop away and the
+   stream gets the whole display. */
 function fitCanvas(){
-  var availW=window.innerWidth-24, availH=window.innerHeight-24;
+  var bare=document.body.classList.contains("hidechrome");
+  var top=12, bottom=12;
+  if(!bare){
+    var tb=$("topbar").getBoundingClientRect();
+    top=tb.bottom+10;
+    var ch=$("chips").getBoundingClientRect();
+    bottom=Math.max(12,(ch.height|0)+22);
+  }
+  var availW=window.innerWidth-24, availH=window.innerHeight-top-bottom;
+  if(availH<60) availH=60;
   var w=availW, h=w*H/W;
   if(h>availH){ h=availH; w=h*W/H; }
   cv.style.width=w+"px"; cv.style.height=h+"px";
+  var st=$("stage").style;
+  st.paddingTop=top+"px"; st.paddingBottom=bottom+"px";
   var m=$("marks");
   m.style.width=w+"px"; m.style.height=h+"px";
   m.setAttribute("viewBox","0 0 "+w+" "+h);
   drawMarks();
 }
+
+/* Fullscreen is immersive: the chrome fades out after a moment of stillness
+   and returns on any pointer or key activity, like a video player. */
+var chromeTimer=null;
+function pokeChrome(){
+  if(document.body.classList.contains("hidechrome")){
+    document.body.classList.remove("hidechrome");
+    fitCanvas();
+  }
+  clearTimeout(chromeTimer);
+  if(document.fullscreenElement){
+    chromeTimer=setTimeout(function(){
+      document.body.classList.add("hidechrome");
+      fitCanvas();
+    },2600);
+  }
+}
+document.addEventListener("fullscreenchange",function(){ pokeChrome(); fitCanvas(); });
+document.addEventListener("pointermove",pokeChrome);
+document.addEventListener("pointerdown",pokeChrome);
 
 /* ============================== rendering ============================== */
 function render(){
@@ -543,11 +625,27 @@ function render(){
     norm8[i]= v<0?0 : (v>255?255:v|0);
   }
 
+  // Isotherm alarm: pixels at or above the threshold render in a fixed alarm
+  // color.  The comparison happens in normalized-byte space so it costs nothing
+  // extra in the interpolation loops; 256 means "disabled" since no byte reaches it.
+  var isoN=256;
+  if($("isoEn").checked && !agcOn){
+    var isoC=parseFloat($("isoT").value);
+    if(!isNaN(isoC)){
+      if(useF) isoC=(isoC-32)*5/9;
+      var n=((isoC+273.15)/res-lo)*scale;
+      isoN = n<0?0 : (n>255?256:n);
+    }
+  }
+
   var d=img.data, o=0, S=scaleS;
   if(S===1){
     for(i=0;i<NPIX;i++){
-      var i3=norm8[i]*3;
-      d[o++]=lut[i3]; d[o++]=lut[i3+1]; d[o++]=lut[i3+2]; d[o++]=255;
+      if(norm8[i]>=isoN){ d[o++]=255; d[o++]=43; d[o++]=214; d[o++]=255; }
+      else{
+        var i3=norm8[i]*3;
+        d[o++]=lut[i3]; d[o++]=lut[i3+1]; d[o++]=lut[i3+2]; d[o++]=255;
+      }
     }
   }else{
     var ow=W*S, oh=H*S, x, y;
@@ -557,8 +655,12 @@ function render(){
         var x0=sx0[x], x1=sx1[x], fx=sfx[x];
         var t=norm8[r0+x0]+(norm8[r0+x1]-norm8[r0+x0])*fx;
         var b=norm8[r1+x0]+(norm8[r1+x1]-norm8[r1+x0])*fx;
-        var j=((t+(b-t)*fy)|0)*3;
-        d[o++]=lut[j]; d[o++]=lut[j+1]; d[o++]=lut[j+2]; d[o++]=255;
+        var v=(t+(b-t)*fy)|0;
+        if(v>=isoN){ d[o++]=255; d[o++]=43; d[o++]=214; d[o++]=255; }
+        else{
+          var j=v*3;
+          d[o++]=lut[j]; d[o++]=lut[j+1]; d[o++]=lut[j+2]; d[o++]=255;
+        }
       }
     }
   }
@@ -568,6 +670,12 @@ function render(){
   $("sHi").textContent = agcOn?"":fmt(toC(hi));
   drawMarks();
   updateReadouts();
+
+  // Feed the recorder a composited frame in lockstep with the stream
+  if(recorder && recorder.state==="recording"){
+    compositeFrame();
+    if(recTrack && recTrack.requestFrame) recTrack.requestFrame();
+  }
 }
 
 function sensorToScreen(x,y){
@@ -968,18 +1076,196 @@ $("fw").onchange=function(){
   this.value="";
 };
 
-// capture
+/* ============================== capture ============================== */
+// Compositing canvas: the rendered stream plus (optionally) a burned-in data
+// overlay.  Screenshots and recordings both come from here so they always match.
+// Output is at least 640 wide so a native-resolution capture is still usable.
+var comp=document.createElement("canvas");
+var compG=comp.getContext("2d");
+
+function overlayOn(){ return $("ovCap").checked; }
+
+function compositeFrame(){
+  var mult = cv.width>=640 ? 1 : Math.round(640/cv.width);
+  var w=cv.width*mult, h=cv.height*mult;
+  if(comp.width!==w||comp.height!==h){ comp.width=w; comp.height=h; }
+  compG.imageSmoothingEnabled=$("oSmooth").checked;
+  compG.save();
+  if($("oMirror").checked){ compG.translate(w,0); compG.scale(-1,1); }
+  compG.drawImage(cv,0,0,w,h);
+  compG.restore();
+  if(overlayOn()) drawOverlayData(compG,w,h);
+  return comp;
+}
+
+// FLIR-style burned-in overlay: identity + timestamp top-left, readouts bottom-left,
+// temperature scale right, markers in place.  Everything scales with output height.
+function drawOverlayData(g,w,h){
+  var f=Math.max(11,Math.round(h/26));
+  var pad=Math.round(f*0.55), lh=Math.round(f*1.5);
+  g.font="600 "+f+"px -apple-system,'Segoe UI',Roboto,sans-serif";
+  g.textBaseline="top";
+
+  function box(x,y,lines,colors){
+    var wmax=0,i;
+    for(i=0;i<lines.length;i++) wmax=Math.max(wmax,g.measureText(lines[i]).width);
+    g.fillStyle="rgba(7,9,13,.62)";
+    var bw=wmax+pad*2, bh=lines.length*lh+pad*2-(lh-f);
+    if(g.roundRect){ g.beginPath(); g.roundRect(x,y,bw,bh,Math.round(f/2)); g.fill(); }
+    else g.fillRect(x,y,bw,bh);
+    for(i=0;i<lines.length;i++){
+      g.fillStyle=colors&&colors[i]?colors[i]:"#eef2f7";
+      g.fillText(lines[i],x+pad,y+pad+i*lh);
+    }
+  }
+
+  var d=new Date(), p=function(n){return (n<10?"0":"")+n;};
+  var ts=d.getFullYear()+"-"+p(d.getMonth()+1)+"-"+p(d.getDate())+" "+
+         p(d.getHours())+":"+p(d.getMinutes())+":"+p(d.getSeconds());
+  box(pad,pad,[$("camname").textContent,ts],["#eef2f7","#7e8b9c"]);
+
+  if(!agcOn && raw){
+    var spotC = spotK!==null ? spotK*res-273.15 : toC(raw[spotPos.y*W+spotPos.x]);
+    var lines=["Spot "+fmt(spotC),"Max "+fmt(toC(maxV)),"Min "+fmt(toC(minV))];
+    var colors=["#ff7a1a","#ff5252","#39c4ff"];
+    if(probe){ lines.push("Probe "+fmt(toC(raw[probe.y*W+probe.x]))); colors.push("#ffffff"); }
+    box(pad,h-pad-(lines.length*lh+pad*2-(lh-f)),lines,colors);
+
+    // vertical scale, hot at top
+    var sw=Math.max(6,Math.round(f*0.6)), sh=Math.round(h*0.42);
+    var sx=w-pad-sw, sy=Math.round((h-sh)/2), k;
+    for(k=0;k<sh;k++){
+      var j=Math.round(255*(1-k/(sh-1)))*3;
+      g.fillStyle="rgb("+lut[j]+","+lut[j+1]+","+lut[j+2]+")";
+      g.fillRect(sx,sy+k,sw,1);
+    }
+    g.strokeStyle="rgba(255,255,255,.35)"; g.strokeRect(sx-0.5,sy-0.5,sw+1,sh+1);
+    g.fillStyle="#eef2f7"; g.textBaseline="bottom";
+    var hiTxt=fmt(toC(rangeHi!==null?rangeHi:maxV));
+    g.fillText(hiTxt,sx-pad-g.measureText(hiTxt).width+sw,sy-4);
+    g.textBaseline="top";
+    var loTxt=fmt(toC(rangeLo!==null?rangeLo:minV));
+    g.fillText(loTxt,sx-pad-g.measureText(loTxt).width+sw,sy+sh+4);
+  }
+
+  // markers, in sensor coordinates scaled to the capture
+  var fx=w/W, fy2=h/H, mir=$("oMirror").checked;
+  function mx(px){ return ((mir?(W-1-px):px)+0.5)*fx; }
+  function my(py){ return (py+0.5)*fy2; }
+  g.lineWidth=Math.max(1.5,f/9); g.textBaseline="top";
+  if($("oSpot").checked){
+    var cx=mx(spotPos.x), cy=my(spotPos.y), r=f*0.7;
+    g.strokeStyle="#ff7a1a";
+    g.beginPath(); g.arc(cx,cy,r,0,6.2832); g.stroke();
+    g.beginPath();
+    g.moveTo(cx-r*1.6,cy); g.lineTo(cx-r*0.5,cy);
+    g.moveTo(cx+r*0.5,cy); g.lineTo(cx+r*1.6,cy);
+    g.moveTo(cx,cy-r*1.6); g.lineTo(cx,cy-r*0.5);
+    g.moveTo(cx,cy+r*0.5); g.lineTo(cx,cy+r*1.6);
+    g.stroke();
+  }
+  if($("oMinMax").checked && !agcOn){
+    g.strokeStyle="#ff5252";
+    g.beginPath(); g.arc(mx(maxI%W),my(Math.floor(maxI/W)),f*0.55,0,6.2832); g.stroke();
+    g.strokeStyle="#39c4ff";
+    g.beginPath(); g.arc(mx(minI%W),my(Math.floor(minI/W)),f*0.55,0,6.2832); g.stroke();
+  }
+  if(probe){
+    g.strokeStyle="#ffffff";
+    g.strokeRect(mx(probe.x)-f*0.5,my(probe.y)-f*0.5,f,f);
+  }
+}
+
 function snapPng(){
   if(!raw){ toast("No frame yet","err"); return; }
-  var c=document.createElement("canvas");
-  c.width=cv.width; c.height=cv.height;
-  var g=c.getContext("2d");
-  g.imageSmoothingEnabled=$("oSmooth").checked;
-  if($("oMirror").checked){ g.translate(c.width,0); g.scale(-1,1); }
-  g.drawImage(cv,0,0);
-  c.toBlob(function(b){ dl(b,"tcam-"+stamp()+".png"); });
+  compositeFrame().toBlob(function(b){ dl(b,"tcam-"+stamp()+".png"); });
 }
 $("snapPng").onclick=snapPng;
+
+/* ---- video recording ---- */
+var recorder=null, recTrack=null, recChunks=[], recStart=0, recTimerH=null;
+
+function recTick(){
+  var s=Math.floor((Date.now()-recStart)/1000);
+  $("recTime").textContent=Math.floor(s/60)+":"+((s%60)<10?"0":"")+(s%60);
+}
+
+function startRec(){
+  if(!raw){ toast("No frames yet","err"); return; }
+  if(typeof MediaRecorder==="undefined" || !comp.captureStream){
+    toast("Recording is not supported in this browser","err"); return;
+  }
+  compositeFrame();
+
+  // Prefer frame-accurate capture (a new video frame exactly when the camera
+  // delivers one); fall back to timed sampling where requestFrame is missing
+  var stream;
+  try{
+    stream=comp.captureStream(0);
+    recTrack=stream.getVideoTracks()[0];
+    if(!recTrack.requestFrame){ stream=comp.captureStream(10); recTrack=null; }
+  }catch(e){ stream=comp.captureStream(10); recTrack=null; }
+
+  var mime="", cands=["video/mp4","video/webm;codecs=vp9","video/webm;codecs=vp8","video/webm"];
+  for(var i=0;i<cands.length;i++){
+    if(MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(cands[i])){ mime=cands[i]; break; }
+  }
+
+  try{
+    recorder=new MediaRecorder(stream, mime?{mimeType:mime,videoBitsPerSecond:8000000}
+                                           :{videoBitsPerSecond:8000000});
+  }catch(e){ toast("Could not start recorder","err"); recorder=null; return; }
+
+  recChunks=[];
+  recorder.ondataavailable=function(e){ if(e.data && e.data.size) recChunks.push(e.data); };
+  recorder.onstop=function(){
+    var type=recorder.mimeType||mime||"video/webm";
+    var ext=type.indexOf("mp4")>=0?"mp4":"webm";
+    dl(new Blob(recChunks,{type:type}),"tcam-"+stamp()+"."+ext);
+    recChunks=[];
+  };
+  recorder.start(1000);
+  recStart=Date.now();
+  document.body.classList.add("rec");
+  recTimerH=setInterval(recTick,500);
+  recTick();
+  toast("Recording — overlay "+(overlayOn()?"on":"off"),"ok");
+}
+
+function stopRec(){
+  if(recorder && recorder.state!=="inactive") recorder.stop();
+  recorder=null; recTrack=null;
+  document.body.classList.remove("rec");
+  clearInterval(recTimerH);
+}
+
+$("bRec").onclick=function(){ if(recorder) stopRec(); else startRec(); };
+
+// overlay-in-capture toggle: panel checkbox and top bar button stay in sync
+function setOvCap(on){
+  $("ovCap").checked=on;
+  $("bLayers").classList.toggle("active",on);
+  store.set("ovcap",on?"1":"");
+}
+$("ovCap").onchange=function(){ setOvCap(this.checked); };
+$("bLayers").onclick=function(){ setOvCap(!$("ovCap").checked); };
+setOvCap(store.get("ovcap","1")==="1");
+
+// isotherm persistence
+$("isoEn").onchange=function(){ store.set("isoen",this.checked?"1":""); render(); };
+$("isoT").oninput=function(){ store.set("isot",this.value); render(); };
+$("isoEn").checked=store.get("isoen","")==="1";
+$("isoT").value=store.get("isot","");
+
+// keyboard shortcuts
+document.addEventListener("keydown",function(e){
+  if(e.target && /INPUT|SELECT|TEXTAREA/.test(e.target.tagName)) return;
+  if(e.code==="Space"){ e.preventDefault(); setStream(!streaming); }
+  else if(e.key==="s"||e.key==="S") snapPng();
+  else if(e.key==="r"||e.key==="R") $("bRec").click();
+  else if(e.key==="f"||e.key==="F") $("bFull").click();
+  else if(e.key==="o"||e.key==="O") $("bLayers").click();
+});
 $("snapRaw").onclick=function(){
   if(!lastJson){ toast("No frame yet","err"); return; }
   dl(new Blob([JSON.stringify(lastJson)],{type:"application/json"}),
@@ -1005,6 +1291,11 @@ fetch("/api/status").then(function(r){return r.json();}).then(function(d){
   $("iIp").textContent=d.ip||"--";
   if(d.mode==="ap") $("substate").textContent="access point mode";
 }).catch(function(){});
+
+if(location.protocol==="http:"){
+  $("tlsLinkRow").style.display="block";
+  $("tlsGo").onclick=function(){ location.href="https://"+location.hostname+"/"; };
+}
 
 setScale(scaleS);
 connect();

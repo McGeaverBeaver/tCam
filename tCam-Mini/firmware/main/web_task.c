@@ -28,6 +28,7 @@
  */
 #include "web_task.h"
 #include "web_cmd.h"
+#include "cert_utilities.h"
 #include "dns_hijack.h"
 #include "ctrl_task.h"
 #include "net_utilities.h"
@@ -35,6 +36,7 @@
 #include "system_config.h"
 #include "esp_log.h"
 #include "esp_http_server.h"
+#include "esp_https_server.h"
 #include "esp_ota_ops.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
@@ -59,6 +61,7 @@
 static const char* TAG = "web_task";
 
 static httpd_handle_t server = NULL;
+static httpd_handle_t servers = NULL;   // HTTPS instance (NULL if TLS unavailable)
 
 // Written by the server task during an upload, polled by rsp_task
 static volatile bool ota_active = false;
@@ -76,7 +79,9 @@ static esp_err_t status_get_handler(httpd_req_t* req);
 static esp_err_t scan_get_handler(httpd_req_t* req);
 static esp_err_t ota_post_handler(httpd_req_t* req);
 static esp_err_t redirect_handler(httpd_req_t* req, httpd_err_code_t err);
+static void register_handlers(httpd_handle_t hd);
 static bool start_webserver();
+static void start_https_server();
 
 
 //
@@ -98,6 +103,11 @@ void web_task()
 		vTaskDelete(NULL);
 		return;
 	}
+
+	// TLS alongside plain HTTP.  HTTP must stay primary: captive portal probes are
+	// HTTP, and a forced redirect to a self-signed HTTPS page traps phones in a
+	// portal mini-browser that cannot accept the certificate.
+	start_https_server();
 
 	// Only hijack DNS while we are the access point.  On someone else's network
 	// there is a real resolver and answering for every name would be hostile.
@@ -153,6 +163,15 @@ static bool start_webserver()
 		return false;
 	}
 
+	register_handlers(server);
+
+	ESP_LOGI(TAG, "Web server started on port %d", WEB_PORT);
+	return true;
+}
+
+
+static void register_handlers(httpd_handle_t hd)
+{
 	static const httpd_uri_t index_uri = {
 		.uri = "/", .method = HTTP_GET, .handler = index_get_handler, .user_ctx = NULL
 	};
@@ -166,17 +185,63 @@ static bool start_webserver()
 		.uri = "/api/ota", .method = HTTP_POST, .handler = ota_post_handler, .user_ctx = NULL
 	};
 
-	httpd_register_uri_handler(server, &index_uri);
-	httpd_register_uri_handler(server, &status_uri);
-	httpd_register_uri_handler(server, &scan_uri);
-	httpd_register_uri_handler(server, &ota_uri);
-	web_cmd_register(server);
+	httpd_register_uri_handler(hd, &index_uri);
+	httpd_register_uri_handler(hd, &status_uri);
+	httpd_register_uri_handler(hd, &scan_uri);
+	httpd_register_uri_handler(hd, &ota_uri);
+	web_cmd_register(hd);
 
 	// Anything else - including every OS connectivity probe - is bounced to the UI
-	httpd_register_err_handler(server, HTTPD_404_NOT_FOUND, redirect_handler);
+	httpd_register_err_handler(hd, HTTPD_404_NOT_FOUND, redirect_handler);
+}
 
-	ESP_LOGI(TAG, "Web server started on port %d", WEB_PORT);
-	return true;
+
+/**
+ * Start the HTTPS instance on port 443, sharing every handler with the HTTP
+ * server.  The certificate is the camera's own self-signed one (see
+ * cert_utilities), so browsers warn once per device - expected for a device
+ * with no public name.  Failure here is not fatal: the camera logs it and
+ * continues serving HTTP, which the captive portal requires anyway.
+ */
+static void start_https_server()
+{
+	const unsigned char* cert_pem;
+	const unsigned char* key_pem;
+	esp_err_t ret;
+	size_t cert_len, key_len;
+	httpd_ssl_config_t conf = HTTPD_SSL_CONFIG_DEFAULT();
+
+	if (!cert_get(&cert_pem, &cert_len, &key_pem, &key_len)) {
+		ESP_LOGE(TAG, "No certificate available - HTTPS disabled");
+		return;
+	}
+
+	// In IDF 4.4 cacert_pem doubles as the server certificate
+	conf.cacert_pem = cert_pem;
+	conf.cacert_len = cert_len;
+	conf.prvtkey_pem = key_pem;
+	conf.prvtkey_len = key_len;
+
+	conf.httpd.ctrl_port         = 32769;              // distinct from the HTTP instance
+	conf.httpd.max_open_sockets  = 3;                  // each TLS session costs ~45 KB
+	conf.httpd.lru_purge_enable  = true;
+	conf.httpd.uri_match_fn      = httpd_uri_match_wildcard;
+	conf.httpd.recv_wait_timeout = 15;
+	conf.httpd.send_wait_timeout = 15;
+	// Note: no custom close_fn here - esp_https_server owns session teardown for
+	// TLS sockets.  A browser that vanishes is released when its next WebSocket
+	// send fails instead.
+
+	ret = httpd_ssl_start(&servers, &conf);
+	if (ret != ESP_OK) {
+		ESP_LOGE(TAG, "httpd_ssl_start failed (%d) - HTTPS disabled", ret);
+		servers = NULL;
+		return;
+	}
+
+	register_handlers(servers);
+
+	ESP_LOGI(TAG, "HTTPS server started on port %d", conf.port_secure);
 }
 
 

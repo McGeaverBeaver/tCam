@@ -1,5 +1,5 @@
-set(SOURCES main.c client_if.c ctrl_task.c dns_hijack.c lep_task.c mon_task.c net_cmd_task.c
-            rsp_task.c sif_cmd_task.c web_cmd.c web_task.c)
+set(SOURCES main.c cert_utilities.c client_if.c ctrl_task.c dns_hijack.c lep_task.c mon_task.c
+            net_cmd_task.c rsp_task.c sif_cmd_task.c web_cmd.c web_task.c)
 
 # Compress the web UI before it is embedded.  index.html is the source of truth;
 # index.html.gz is regenerated here on every configure so the two cannot drift.
@@ -26,7 +26,7 @@ endif()
 
 idf_component_register(SRCS ${SOURCES}
                     INCLUDE_DIRS .
-                    REQUIRES clock cmd i2c lepton sys app_update esp_http_server mdns
+                    REQUIRES clock cmd i2c lepton sys app_update esp_http_server esp_https_server mbedtls nvs_flash mdns
                     EMBED_FILES "www/index.html.gz")
 
 target_compile_definitions(${COMPONENT_LIB} PRIVATE LV_CONF_INCLUDE_SIMPLE=1)

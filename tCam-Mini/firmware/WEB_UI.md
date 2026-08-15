@@ -48,7 +48,29 @@ surfaces and a slide-over settings panel.
 | Network | Camera name, network scan and join, startup mode |
 | System | Model and firmware information, firmware update, clock |
 
-The toolbar over the stream has pause/resume, snapshot, FFC and fullscreen.
+The toolbar over the stream has overlay toggle, record, pause/resume, snapshot,
+FFC and fullscreen.  In fullscreen the chrome fades out after a moment and returns
+on any pointer movement, so the stream gets the entire display.
+
+**Recording and screenshots.**  Record captures video (mp4 or webm, whichever the
+browser encodes) at the selected output resolution, frame-accurate to the stream.
+Screenshots and recordings share one compositor, and both honor the *capture
+overlay* setting: burned-in camera name, timestamp, spot/max/min readouts,
+temperature scale and markers — or a completely clean image.  The overlay can be
+toggled at any time, including mid-recording (layers button, or the O key).
+
+**Isotherm alarm.**  Pixels at or above a chosen temperature render in a fixed
+alarm color regardless of palette.
+
+**Keyboard**: Space pause/resume · R record · S screenshot · F fullscreen ·
+O overlay.
+
+**HTTPS.**  The camera also serves the interface on port 443 with a certificate it
+generates for itself on first boot (EC P-256, unique per camera, stored in NVS,
+valid to 2050).  The browser warns once per device because it is self-signed —
+expected for a device with no public name.  HTTP remains primary: captive-portal
+probes are plain HTTP, and phones' portal mini-browsers cannot accept certificate
+warnings, so there is deliberately no forced redirect.
 
 Tap the image to drop a probe point (tap again to clear), or switch the cursor to
 **Move spot** to reposition the camera's own spot meter — the reading measured by
