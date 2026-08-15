@@ -245,6 +245,12 @@ bool wifi_is_connected()
 }
 
 
+bool wifi_is_ap_mode()
+{
+	return ((wifi_info.flags & NET_INFO_FLAG_CLIENT_MODE) == 0);
+}
+
+
 /**
  * Return current WiFi configuration and state
  */
@@ -307,7 +313,7 @@ static bool enable_esp_wifi_ap()
 	wifi_config_t wifi_config = {
         .ap = {
             .ssid_len = strlen(wifi_info.ap_ssid),
-            .max_connection = 1,
+            .max_connection = WIFI_AP_MAX_CONN,
             .authmode = WIFI_AUTH_WPA_WPA2_PSK
         }
     };
@@ -316,8 +322,12 @@ static bool enable_esp_wifi_ap()
     if (strlen(wifi_info.ap_pw) == 0) {
         wifi_config.ap.authmode = WIFI_AUTH_OPEN;
     }
-    
-    ret = esp_wifi_set_mode(WIFI_MODE_AP);
+
+    // APSTA rather than AP: the station interface is not associated with anything,
+    // but its presence is what allows esp_wifi_scan_start() to run while we are
+    // serving the SoftAP.  That is what lets the web UI show the user a list of
+    // nearby networks to join instead of making them type an SSID blind.
+    ret = esp_wifi_set_mode(WIFI_MODE_APSTA);
     if (ret != ESP_OK) {
     	ESP_LOGE(TAG, "Could not set Soft AP mode (%d)", ret);
     	return false;

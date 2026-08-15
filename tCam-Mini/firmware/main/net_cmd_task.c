@@ -24,7 +24,9 @@
  *
  */
 #include "net_cmd_task.h"
+#include "client_if.h"
 #include "ctrl_task.h"
+#include "web_task.h"
 #include "cmd_utilities.h"
 #include "net_utilities.h"
 #include "system_config.h"
@@ -90,8 +92,10 @@ void net_cmd_task()
 	// Loop to setup socket, wait for connection, handle connection.  Terminates
 	// when client disconnects
 	
-	// Wait until the network interface is connected
-	if (!(*net_is_connected)()) {
+	// Wait until the network interface is connected (this was previously a single
+	// 500 mSec delay that fell through whether or not the interface came up, so
+	// mDNS could be started against an uninitialised netif on a slow association)
+	while (!(*net_is_connected)()) {
 		vTaskDelay(pdMS_TO_TICKS(500));
 	}
 	
@@ -138,6 +142,18 @@ void net_cmd_task()
             break;
         }
         ESP_LOGI(TAG, "Socket accepted");
+
+        // Refuse the connection if a browser session currently owns the camera.
+        // cmd_utilities keeps a single shared receive/response buffer pair, so two
+        // concurrent clients would interleave into each other's packets.
+        if (!client_if_claim(CLIENT_IF_TCP)) {
+            ESP_LOGW(TAG, "Refusing connection - web client holds the session");
+            shutdown(client_sock, 0);
+            close(client_sock);
+            client_sock = -1;
+            continue;
+        }
+
         connected = 1;
 		
         // Handle communication with client
@@ -175,10 +191,14 @@ void net_cmd_task()
         
         // Close this session
         connected = false;
+        client_if_release(CLIENT_IF_TCP);
         if (client_sock != -1) {
             ESP_LOGI(TAG, "Shutting down socket and restarting...");
             shutdown(client_sock, 0);
             close(client_sock);
+            // Clear the descriptor so a late send() cannot target a closed (or
+            // subsequently recycled) fd
+            client_sock = -1;
         }
 	}
 
@@ -260,6 +280,14 @@ static void net_cmd_start_mdns()
 		ESP_LOGE(TAG, "Could not initialize mDNS service (%d)", ret);
 		return;
 	}
-	
+
+	// Also advertise the on-camera web UI.  Browsers and file managers look for
+	// _http._tcp, so the camera shows up as a normal device on the network and
+	// http://<camera-name>.local resolves without anything being installed.
+	ret = mdns_service_add(NULL, "_http", "_tcp", WEB_PORT, service_txt_data, NUM_SERVICE_TXT_ITEMS);
+	if (ret != ESP_OK) {
+		ESP_LOGE(TAG, "Could not add mDNS http service (%d)", ret);
+	}
+
 	ESP_LOGI(TAG, "mDNS started");
 }

@@ -24,12 +24,15 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
+#include "client_if.h"
 #include "net_cmd_task.h"
 #include "sif_cmd_task.h"
 #include "ctrl_task.h"
 #include "lep_task.h"
 #include "mon_task.h"
 #include "rsp_task.h"
+#include "web_cmd.h"
+#include "web_task.h"
 #include "system_config.h"
 #include "sys_utilities.h"
 
@@ -87,9 +90,19 @@ void app_main(void)
     	xTaskCreatePinnedToCore(&rsp_task, "rsp_task",  2816, NULL, 19, &task_handle_rsp,  0);
     	xTaskCreatePinnedToCore(&lep_task, "lep_task",  2304, NULL, 18, &task_handle_lep,  1);
     } else {
+    	// Arbitrates between the legacy TCP client and a browser on the web server.
+    	// Both must be initialised before rsp_task starts, since it begins polling
+    	// the client state immediately.
+    	client_if_init();
+    	web_cmd_init();
+
     	xTaskCreatePinnedToCore(&net_cmd_task, "net_cmd_task",  3072, NULL, 1, &task_handle_cmd,  0);
     	xTaskCreatePinnedToCore(&rsp_task, "rsp_task",  2816, NULL, 19, &task_handle_rsp,  0);
     	xTaskCreatePinnedToCore(&lep_task, "lep_task",  2304, NULL, 19, &task_handle_lep,  1);
+
+    	// Serves the on-camera UI.  Runs at a low priority so that neither the
+    	// lepton VoSPI transfer nor the response path can be starved by a browser.
+    	xTaskCreatePinnedToCore(&web_task, "web_task",  3072, NULL, 1, &task_handle_web,  0);
     }
 
 #ifdef INCLUDE_SYS_MON

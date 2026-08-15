@@ -25,6 +25,7 @@
  */
 #include "net_cmd_task.h"
 #include "sif_cmd_task.h"
+#include "client_if.h"
 #include "ctrl_task.h"
 #include "lep_task.h"
 #include "rsp_task.h"
@@ -33,6 +34,7 @@
 #include "sif_utilities.h"
 #include "sys_utilities.h"
 #include "upd_utilities.h"
+#include "web_task.h"
 #include "system_config.h"
 #include "esp_system.h"
 #include "esp_log.h"
@@ -154,7 +156,7 @@ void rsp_task()
 		if (if_type == CTRL_IF_MODE_SIF) {
 			connected = true;
 		} else {
-			if (net_cmd_connected()) {
+			if (client_if_connected()) {
 				connected = true;
 			} else if (connected) {
 				// Clear our state since we are no longer connected
@@ -187,7 +189,12 @@ void rsp_task()
 						if (!system_spi_slave_busy()) {
 							send_spi_image(sys_image_rsp_buffer.bufferP, sys_image_rsp_buffer.length);
 						}
-					} else {
+					} else if (!web_ota_in_progress()) {
+						// Frames are still consumed above so lep_task is never held
+						// up, but they are dropped rather than transmitted while a
+						// firmware image is uploading.  Roughly 53 KB of json per
+						// frame competing with the upload is the difference between
+						// a quick update and a stalled one.
 						send_response(sys_image_rsp_buffer.bufferP, sys_image_rsp_buffer.length, false);
 					}
 				}
@@ -547,10 +554,6 @@ static int process_image(int n)
  */
 static void send_response(char* rsp, int rsp_length, bool ser_mode)
 {
-	int byte_offset;
-	int err;
-	int len;
-	int sock;
 #ifdef LOG_SEND_TIMESTAMP
 	int64_t tb, te;
 	
@@ -564,20 +567,9 @@ static void send_response(char* rsp, int rsp_length, bool ser_mode)
 #endif
 		sif_send(rsp, rsp_length);
 	} else {
-		sock = net_cmd_get_socket();
-		
-		// Write our response to the socket
-    	byte_offset = 0;
-		while (byte_offset < rsp_length) {
-			len = rsp_length - byte_offset;
-			if (len > RSP_MAX_TX_PKT_LEN) len = RSP_MAX_TX_PKT_LEN;
-			err = send(sock, rsp + byte_offset, len, 0);
-			if (err < 0) {
-				ESP_LOGE(TAG, "Error in socket send: errno %d", errno);
-				break;
-			}
-			byte_offset += err;
-		}
+		// Dispatch to whichever transport currently holds the session - the legacy
+		// TCP socket used by the desktop/mobile apps, or a browser WebSocket
+		(void) client_if_send(rsp, rsp_length);
 	}
 	
 #ifdef LOG_SEND_TIMESTAMP

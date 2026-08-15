@@ -1,8 +1,11 @@
 ## tCam-Mini Firmware
 tCam-Mini (tCam-POE) firmware is an Espressif IDF project.  You need to have the Espressif v4.4.4 IDF installed to build the firmware.  Pre-compiled binary files are provided (```precompiled``` directory here) and can be programmed using the IDF tools or a Windows utility as described in the ```programming``` directory elsewhere in this repostitory.
 
+### On-camera web interface
+The camera serves its own browser-based user interface, so a viewer and full configuration are available without installing the desktop or mobile application.  Join the camera's WiFi network and the interface appears by itself, or browse to ```http://<camera-name>.local``` when the camera is on your network.  See [WEB_UI.md](WEB_UI.md) for details.  The existing json command protocol on port 5001 is unchanged and all existing clients continue to work.
+
 ### Building
-The ```sdkconfig``` file contains ESP32 configuration and build-specific information.  All camera-specific configuration is in the ```main/system_config.h``` file.
+The ```sdkconfig``` file contains ESP32 configuration and build-specific information.  All camera-specific configuration is in the ```main/system_config.h``` file.  The web interface source is ```main/www/index.html```; it is compressed and embedded in the firmware image at build time.
 
 To build the project: ```idf.py build```
 

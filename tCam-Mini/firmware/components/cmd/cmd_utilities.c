@@ -93,10 +93,38 @@ void init_command_processor()
 
 
 /**
+ * Return the number of unprocessed bytes held in the circular buffer
+ */
+static int rx_buffer_used()
+{
+	int used = rx_circular_push_index - rx_circular_pop_index;
+
+	if (used < 0) used += JSON_MAX_CMD_TEXT_LEN;
+
+	return used;
+}
+
+
+/**
  * Push received data into our circular buffer
+ *
+ * Note: One byte is always left unused so that a full buffer can be distinguished
+ * from an empty one (push == pop means empty).  Data that would overrun the buffer
+ * is discarded and the buffer is flushed rather than silently overwriting bytes the
+ * parser has not consumed yet - a partial command is better dropped outright than
+ * spliced into the middle of the following one.
  */
 void push_rx_data(char* data, int len)
-{	
+{
+	if (len <= 0) return;
+
+	// Discard rather than corrupt if this write cannot fit
+	if (len > (JSON_MAX_CMD_TEXT_LEN - 1 - rx_buffer_used())) {
+		ESP_LOGE(TAG, "rx buffer overflow (%d bytes); flushing", len);
+		init_command_processor();
+		return;
+	}
+
 	// Push the received data into the circular buffer
 	while (len-- > 0) {
 		rx_circular_buffer[rx_circular_push_index] = *data++;
@@ -125,21 +153,29 @@ bool process_rx_data() {
 				if (++rx_circular_pop_index >= JSON_MAX_CMD_TEXT_LEN) rx_circular_pop_index = 0;
 			}
 			
-			// Copy up to end
+			// Copy up to end, reserving the final byte of json_cmd_string for the
+			// null terminator so that an over-long packet cannot write past the end
+			// of the buffer
 			i = 0;
-			while ((rx_circular_pop_index != end) && (i < JSON_MAX_CMD_TEXT_LEN)) {
-				if (i < JSON_MAX_CMD_TEXT_LEN) {
-					json_cmd_string[i] = rx_circular_buffer[rx_circular_pop_index];
-				}
+			while ((rx_circular_pop_index != end) && (i < (JSON_MAX_CMD_TEXT_LEN - 1))) {
+				json_cmd_string[i] = rx_circular_buffer[rx_circular_pop_index];
 				i++;
 				if (++rx_circular_pop_index >= JSON_MAX_CMD_TEXT_LEN) rx_circular_pop_index = 0;
 			}
 			json_cmd_string[i] = 0;               // Make sure this is a null-terminated string
-			
-			// Skip past end
-			if (++rx_circular_pop_index >= JSON_MAX_CMD_TEXT_LEN) rx_circular_pop_index = 0;
-			
-			if (i < JSON_MAX_CMD_TEXT_LEN+1) {
+
+			// Discard any remainder of an over-long packet up to its terminator
+			if (rx_circular_pop_index != end) {
+				ESP_LOGE(TAG, "command exceeded %d bytes; discarding", JSON_MAX_CMD_TEXT_LEN - 1);
+				while (rx_circular_pop_index != end) {
+					if (++rx_circular_pop_index >= JSON_MAX_CMD_TEXT_LEN) rx_circular_pop_index = 0;
+				}
+				// Skip past end
+				if (++rx_circular_pop_index >= JSON_MAX_CMD_TEXT_LEN) rx_circular_pop_index = 0;
+			} else {
+				// Skip past end
+				if (++rx_circular_pop_index >= JSON_MAX_CMD_TEXT_LEN) rx_circular_pop_index = 0;
+
 				// Process json command string
 				process_rx_packet();
 				valid_string = true;
@@ -577,11 +613,12 @@ static int in_buffer(char c)
 	while (i != rx_circular_push_index) {
 		if (c == rx_circular_buffer[i]) {
 			return i;
-		} else {
-			if (i++ >= JSON_MAX_CMD_TEXT_LEN) i = 0;
 		}
+		// Pre-increment: a post-increment test here wraps one index too late and
+		// reads rx_circular_buffer[JSON_MAX_CMD_TEXT_LEN], one byte past the end
+		if (++i >= JSON_MAX_CMD_TEXT_LEN) i = 0;
 	}
-	
+
 	return -1;
 }
 

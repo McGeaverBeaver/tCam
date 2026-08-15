@@ -35,6 +35,12 @@
 // Maximum attempts to reconnect to an AP in client mode before starting to wait
 #define WIFI_FAST_RECONNECT_ATTEMPTS  10
 
+// Stations allowed to associate with the camera's SoftAP.  This was 1, which meant
+// a phone already on the camera silently locked everyone else out - including the
+// operator's laptop.  Command sessions are still arbitrated to one at a time by
+// client_if, but simply being able to load the page should not be exclusive.
+#define WIFI_AP_MAX_CONN              4
+
 
 //
 // WiFi Utilities API
@@ -43,5 +49,11 @@ bool wifi_init();
 bool wifi_reinit();
 bool wifi_is_connected();
 net_info_t* wifi_get_info();
+
+/**
+ * True when the WiFi interface is acting as an access point rather than as a
+ * station on someone else's network.
+ */
+bool wifi_is_ap_mode();
 
 #endif /* WIFI_UTILITIES_H */

@@ -1,0 +1,116 @@
+# tCam-Mini on-camera web interface
+
+The camera serves its own user interface. Point a browser at it and you get a live
+viewer, camera configuration, network setup and firmware updates — with nothing
+installed on the client.
+
+The desktop application, the Android application and the Python library all keep
+working exactly as before. The web UI is an additional client, not a replacement,
+and it speaks the same json command protocol over a WebSocket instead of a raw TCP
+socket.
+
+## Getting to it
+
+**Straight out of the box (access point mode)**
+
+1. Join the camera's WiFi network, `tCam-Mini-XXXX`.
+2. Your phone or laptop should pop the interface up by itself. If it does not,
+   browse to `http://192.168.4.1/`.
+
+The camera answers every DNS query while it is an access point, so the operating
+system's own connectivity check lands on the camera and triggers the usual
+"sign in to network" prompt. That prompt *is* the app.
+
+**On your own network (station mode)**
+
+1. Open the web UI in access point mode, go to **Network**.
+2. Press **Scan for networks**, pick yours, enter the password.
+3. Tick **Join this network at startup** and save.
+
+The camera then appears at `http://<camera-name>.local` — it advertises `_http._tcp`
+over mDNS, so it also shows up in network browsers. If it cannot join, it falls back
+to its own access point, so a mistyped password does not need a cable to fix.
+
+## What the interface does
+
+| Tab | Contents |
+| --- | --- |
+| View | Palette, temperature range, spot meter, hot/cold markers, units, PNG and raw capture |
+| Camera | Stream control and frame interval, FFC, AGC, gain mode, emissivity |
+| Network | Camera name, network scan and join, startup mode |
+| System | Model and firmware information, firmware update, clock |
+
+Tap anywhere on the image to drop a probe point; tap it again to clear it.
+
+**Save PNG** writes the image as displayed, upscaled 4×. **Save raw** writes the
+camera's own json frame with the `.tjsn` extension — the same format the desktop
+application writes, so existing analysis tools still read it.
+
+## How it is put together
+
+The camera sends 16-bit radiometric frames exactly as it always has. All palette
+mapping, scaling and measurement happens in the browser. Adding a palette or a
+readout therefore costs the camera nothing, and the firmware never grew an image
+renderer.
+
+```
+browser  ──HTTP──▶  esp_http_server  ──▶  index.html.gz  (embedded in the app image)
+         ──WS────▶  web_cmd  ──▶  cmd_utilities  (the existing json command parser)
+                                        │
+         ◀──WS────  client_if  ◀──  rsp_task  ──▶  legacy TCP socket, port 5001
+```
+
+`client_if` arbitrates: one command client at a time, first to connect wins. The
+receive and response buffers in `cmd_utilities` are shared singletons, so two
+concurrent clients would interleave into each other's packets. A second client is
+refused rather than allowed to corrupt the first. The camera's access point now
+accepts four associations rather than one, so being refused a *command session* no
+longer means being unable to associate at all.
+
+The UI is a single gzipped HTML file (about 11 KB) linked into the application
+partition by `EMBED_FILES`. Keeping it there rather than on a separate filesystem
+means an OTA update replaces the firmware and its interface atomically — they can
+never be left at mismatched versions.
+
+## Firmware updates
+
+**System ▸ Choose firmware .bin** uploads `tCamMini.bin` directly to the camera.
+
+The camera writes to the spare application partition and only switches the boot
+target once the whole image has arrived and passed validation, so an interrupted or
+corrupt upload leaves the running firmware untouched. Image streaming is suppressed
+during an upload so that 53 KB frames are not competing with it.
+
+This replaces the previous update path, in which the camera asked the host for each
+chunk over the json protocol and gave up after a fixed number of retries. That
+inverted the normal direction of control, required a bespoke implementation in every
+client, and failed in ways the operator could not act on. The old protocol still
+works for existing clients; nothing was removed.
+
+## Building
+
+`index.html` is the source of truth. `main/CMakeLists.txt` runs `compress_web.py` at
+configure time to regenerate `www/index.html.gz`, so the two cannot drift. A
+pre-built `.gz` is committed as well, so the build still works if Python is
+unavailable.
+
+```
+idf.py build
+idf.py -p PORT -b 921600 flash
+```
+
+Requires ESP-IDF v4.4.4, as before. `CONFIG_HTTPD_WS_SUPPORT` must be enabled — it is
+set in the committed `sdkconfig`, but a `sdkconfig` regenerated from defaults will
+silently drop the WebSocket endpoint without it.
+
+## Notes and limits
+
+- A frame is roughly 53 KB of base64 json. On a marginal link, raising the frame
+  interval on the Camera tab is by far the most effective stabiliser.
+- AGC produces a higher contrast picture but the pixels stop being temperatures, so
+  the readouts are disabled while it is on.
+- The DNS responder only runs in access point mode. On a network with a real
+  resolver, hijacking every query would be hostile.
+- The interface is served over plain HTTP. It is intended for a camera on a local or
+  point-to-point network, and there is no authentication — the same trust model the
+  raw command port has always had.
