@@ -40,6 +40,11 @@
 // is well above the esp_http_server default.
 #define WEB_TASK_STACK_SIZE 6144
 
+// Sockets each server instance accepts.  Also sizes the array passed to
+// httpd_get_client_list(), which requires at least max_open_sockets entries, so
+// both servers are configured from this one value to keep them in step.
+#define WEB_MAX_SOCKETS 4
+
 
 //
 // Web Task API

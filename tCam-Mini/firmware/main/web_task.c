@@ -29,6 +29,7 @@
 #include "web_task.h"
 #include "web_cmd.h"
 #include "cert_utilities.h"
+#include "client_if.h"
 #include "dns_hijack.h"
 #include "ctrl_task.h"
 #include "net_utilities.h"
@@ -83,6 +84,7 @@ static esp_err_t redirect_handler(httpd_req_t* req, httpd_err_code_t err);
 static void register_handlers(httpd_handle_t hd);
 static bool start_webserver();
 static void start_https_server();
+static int count_connections(httpd_handle_t hd);
 
 
 //
@@ -171,7 +173,7 @@ static bool start_webserver()
 	config.server_port      = WEB_PORT;
 	config.ctrl_port        = 32768;
 	config.stack_size       = WEB_TASK_STACK_SIZE;
-	config.max_open_sockets = 4;
+	config.max_open_sockets = WEB_MAX_SOCKETS;
 	config.lru_purge_enable = true;
 	// Wildcard matching lets one handler answer every captive-portal probe URL
 	config.uri_match_fn     = httpd_uri_match_wildcard;
@@ -260,7 +262,7 @@ static void start_https_server()
 	// most of a second on this part.  With only two slots the server spent its
 	// time purging half-finished handshakes, which the client saw as connection
 	// resets.  The per-session buffers come from PSRAM now, so slots are cheap.
-	conf.httpd.max_open_sockets  = 4;
+	conf.httpd.max_open_sockets  = WEB_MAX_SOCKETS;
 	conf.httpd.lru_purge_enable  = true;
 	conf.httpd.uri_match_fn      = httpd_uri_match_wildcard;
 	// Generous relative to the ~750 mSec an ECDHE handshake takes here
@@ -295,23 +297,73 @@ static esp_err_t index_get_handler(httpd_req_t* req)
 }
 
 
+/**
+ * Count the sockets currently open on a server instance.  Used as the "how many
+ * clients are talking to the camera" figure: a browser holds one for the page and
+ * one for the WebSocket, so this is connections rather than people, and the UI
+ * labels it accordingly.
+ */
+static int count_connections(httpd_handle_t hd)
+{
+	int fds[WEB_MAX_SOCKETS];
+	size_t num = WEB_MAX_SOCKETS;
+
+	if (hd == NULL) return 0;
+	if (httpd_get_client_list(hd, &num, fds) != ESP_OK) return 0;
+
+	return (int) num;
+}
+
+
 static esp_err_t status_get_handler(httpd_req_t* req)
 {
-	char buf[384];
+	char buf[512];
 	const esp_app_desc_t* app_desc;
 	int brd_type;
 	int if_type;
 	int len;
+	int rssi = 0;
+	int stations = -1;
 	net_info_t* net_infoP;
+	static const char* session_names[] = { "none", "tcp", "web" };
 
 	app_desc = esp_ota_get_app_description();
 	net_infoP = (*net_get_info)();
 	ctrl_get_if_mode(&brd_type, &if_type);
 
+	// Signal strength means different things depending on which side we are on.
+	// As a station it is our link to the router.  As an access point we have no
+	// single link, so report the strongest associated station - in practice the
+	// device closest to the camera, which is usually the one being held.
+	if (if_type == CTRL_IF_MODE_WIFI) {
+		if (wifi_is_ap_mode()) {
+			static wifi_sta_list_t sta_list;
+
+			if (esp_wifi_ap_get_sta_list(&sta_list) == ESP_OK) {
+				int i;
+
+				stations = sta_list.num;
+				for (i = 0; i < sta_list.num; i++) {
+					if ((i == 0) || (sta_list.sta[i].rssi > rssi)) {
+						rssi = sta_list.sta[i].rssi;
+					}
+				}
+			}
+		} else {
+			wifi_ap_record_t ap;
+
+			if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) {
+				rssi = ap.rssi;
+			}
+		}
+	}
+
 	len = snprintf(buf, sizeof(buf),
 		"{\"camera\":\"%s\",\"version\":\"%s\",\"model\":%d,"
 		"\"interface\":\"%s\",\"mode\":\"%s\",\"ip\":\"%d.%d.%d.%d\","
-		"\"sta_ssid\":\"%s\",\"ota\":%s}",
+		"\"sta_ssid\":\"%s\",\"ota\":%s,"
+		"\"rssi\":%d,\"stations\":%d,\"connections\":%d,\"session\":\"%s\","
+		"\"heap\":%d}",
 		net_infoP->ap_ssid,
 		app_desc->version,
 		(brd_type == CTRL_BRD_ETH_TYPE) ? CAMERA_MODEL_NUM_ETH : CAMERA_MODEL_NUM_WIFI,
@@ -320,7 +372,12 @@ static esp_err_t status_get_handler(httpd_req_t* req)
 		net_infoP->cur_ip_addr[3], net_infoP->cur_ip_addr[2],
 		net_infoP->cur_ip_addr[1], net_infoP->cur_ip_addr[0],
 		net_infoP->sta_ssid,
-		ota_active ? "true" : "false");
+		ota_active ? "true" : "false",
+		rssi,
+		stations,
+		count_connections(server) + count_connections(servers),
+		session_names[client_if_active()],
+		heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
 
 	httpd_resp_set_type(req, "application/json");
 	return httpd_resp_send(req, buf, len);

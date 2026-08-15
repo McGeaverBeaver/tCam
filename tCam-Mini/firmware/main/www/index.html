@@ -76,6 +76,24 @@ canvas.mirror{transform:scaleX(-1)}
 .spacer{flex:1}
 #fps{font-size:11px;color:var(--dim);font-variant-numeric:tabular-nums;white-space:nowrap}
 
+/* signal strength + connected clients */
+#netinfo{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--dim);
+         font-variant-numeric:tabular-nums;white-space:nowrap;cursor:default}
+#netinfo .sep{width:1px;height:12px;background:var(--line);margin:0 2px}
+#sigIcon{width:17px;height:14px;flex:none}
+/* bars are painted dim, then lit up to the current strength */
+#sigIcon .b{fill:var(--line-brt)}
+#sigIcon.s1 .b:nth-child(1),
+#sigIcon.s2 .b:nth-child(-n+2),
+#sigIcon.s3 .b:nth-child(-n+3),
+#sigIcon.s4 .b:nth-child(-n+4){fill:var(--sig)}
+#netinfo.weak{--sig:var(--err)}
+#netinfo.fair{--sig:var(--warn)}
+#netinfo.good{--sig:var(--ok)}
+#netinfo{--sig:var(--dim)}
+.usericon{width:15px;height:13px;flex:none;fill:none;stroke:currentColor;
+          stroke-width:1.6;stroke-linecap:round}
+
 .tbtn{width:38px;height:38px;border:none;border-radius:10px;background:transparent;
       color:var(--fg);cursor:pointer;display:inline-flex;align-items:center;
       justify-content:center;flex:none;transition:background .15s,color .15s}
@@ -189,6 +207,7 @@ body.rec #bRec{background:rgba(255,77,74,.15);color:var(--err)}
   #scalebar{display:none}
   .chip span{font-size:14px}
   #fps,#bFfc{display:none}
+  #netinfo .sep,#netinfo .usericon,#cliTxt,#sigTxt{display:none}
 }
 </style>
 </head>
@@ -208,6 +227,20 @@ body.rec #bRec{background:rgba(255,77,74,.15);color:var(--err)}
     <div id="substate">connecting&hellip;</div>
   </div>
   <div class="spacer"></div>
+  <div id="netinfo" title="">
+    <svg id="sigIcon" viewBox="0 0 20 16" aria-hidden="true">
+      <rect class="b" x="1"  y="11" width="3" height="4"  rx="1"/>
+      <rect class="b" x="6"  y="8"  width="3" height="7"  rx="1"/>
+      <rect class="b" x="11" y="5"  width="3" height="10" rx="1"/>
+      <rect class="b" x="16" y="1"  width="3" height="14" rx="1"/>
+    </svg>
+    <span id="sigTxt">&mdash;</span>
+    <span class="sep"></span>
+    <svg viewBox="0 0 20 16" aria-hidden="true" class="usericon">
+      <circle cx="10" cy="5" r="3.2"/><path d="M4 15c0-3.3 2.7-5.2 6-5.2s6 1.9 6 5.2"/>
+    </svg>
+    <span id="cliTxt">&mdash;</span>
+  </div>
   <div id="fps">&mdash;</div>
   <div id="recChip"><i></i><span id="recTime">0:00</span></div>
   <button class="tbtn active" id="bLayers" title="Include data overlay in captures (O)">
@@ -417,6 +450,17 @@ body.rec #bRec{background:rgba(255,77,74,.15);color:var(--err)}
     <div class="kv"><span>Sensor</span><span id="iLep">--</span></div>
     <div class="kv"><span>Interface</span><span id="iIf">--</span></div>
     <div class="kv"><span>Address</span><span id="iIp">--</span></div>
+
+    <div class="sect">Link</div>
+    <div class="kv"><span>Signal</span><span id="iRssi">--</span></div>
+    <div class="kv"><span>Devices on camera AP</span><span id="iStations">--</span></div>
+    <div class="kv"><span>Open connections</span><span id="iConns">--</span></div>
+    <div class="kv"><span>Stream held by</span><span id="iSession">--</span></div>
+    <div class="kv"><span>Free internal memory</span><span id="iHeap">--</span></div>
+    <div class="hint">In access point mode the signal shown is the strongest connected
+      device — usually whichever one is closest. In station mode it is the camera's own
+      link to your network; below about &minus;75&nbsp;dBm, raise the frame interval on
+      the Camera tab.</div>
 
     <div class="sect">Firmware update</div>
     <input type="file" id="fw" accept=".bin" style="display:none">
@@ -1282,15 +1326,68 @@ function dl(blob,name){
   setTimeout(function(){URL.revokeObjectURL(u);},2000);
 }
 
+/* ==================== link status (signal + clients) ==================== */
+// RSSI thresholds follow the usual WiFi convention: better than -55 dBm is
+// excellent, -67 is the floor for reliable streaming, -75 starts to struggle.
+function sigBars(rssi){
+  if(rssi >= -55) return 4;
+  if(rssi >= -67) return 3;
+  if(rssi >= -75) return 2;
+  if(rssi >= -85) return 1;
+  return 0;
+}
+
+function applyLink(d){
+  var box=$("netinfo"), icon=$("sigIcon");
+  var apMode=(d.mode==="ap");
+  var rssi=(typeof d.rssi==="number")?d.rssi:0;
+  var bars=rssi?sigBars(rssi):0;
+
+  icon.setAttribute("class", bars?("s"+bars):"");
+  box.classList.remove("weak","fair","good");
+  if(bars>=3) box.classList.add("good");
+  else if(bars===2) box.classList.add("fair");
+  else if(bars>=0 && rssi) box.classList.add("weak");
+
+  $("sigTxt").textContent = rssi ? (rssi+" dBm") : (apMode?"no clients":"--");
+
+  // "connections" counts sockets, and a browser holds one for the page plus one
+  // for the WebSocket, so report devices where we can measure them (associated
+  // stations in access point mode) and sockets otherwise, labelled honestly.
+  var n = apMode ? d.stations : d.connections;
+  if(typeof n!=="number"||n<0) n=0;
+  $("cliTxt").textContent=n;
+
+  var tip = apMode
+    ? (d.stations+" device"+(d.stations===1?"":"s")+" joined this camera's network"+
+       (rssi?", strongest at "+rssi+" dBm":""))
+    : ("Signal to "+(d.sta_ssid||"network")+": "+rssi+" dBm · "+
+       d.connections+" open connection"+(d.connections===1?"":"s"));
+  box.title=tip;
+
+  $("iRssi").textContent = rssi ? (rssi+" dBm"+(bars?" ("+["none","weak","fair","good","excellent"][bars]+")":"")) : "--";
+  $("iStations").textContent = apMode ? d.stations : "n/a (station mode)";
+  $("iConns").textContent = (typeof d.connections==="number")?d.connections:"--";
+  $("iSession").textContent = {none:"idle",tcp:"desktop/mobile app",web:"this browser"}[d.session]||d.session||"--";
+  $("iHeap").textContent = d.heap ? (Math.round(d.heap/1024)+" KB") : "--";
+}
+
+function pollStatus(){
+  fetch("/api/status",{cache:"no-store"}).then(function(r){return r.json();}).then(function(d){
+    if(d.camera){ $("camname").textContent=d.camera; document.title=d.camera; }
+    $("iVer").textContent=d.version||"--";
+    if(d.model!==undefined) $("iModel").textContent=d.model;
+    $("iIf").textContent=d.interface||"--";
+    $("iIp").textContent=d.ip||"--";
+    if(d.mode==="ap" && !wsOK) $("substate").textContent="access point mode";
+    applyLink(d);
+  }).catch(function(){});
+}
+
 /* ============================== boot ============================== */
-fetch("/api/status").then(function(r){return r.json();}).then(function(d){
-  if(d.camera){ $("camname").textContent=d.camera; document.title=d.camera; }
-  $("iVer").textContent=d.version||"--";
-  if(d.model!==undefined) $("iModel").textContent=d.model;
-  $("iIf").textContent=d.interface||"--";
-  $("iIp").textContent=d.ip||"--";
-  if(d.mode==="ap") $("substate").textContent="access point mode";
-}).catch(function(){});
+pollStatus();
+// Cheap: a few hundred bytes every five seconds, next to 53 KB image frames
+setInterval(pollStatus,5000);
 
 if(location.protocol==="http:"){
   $("tlsLinkRow").style.display="block";
