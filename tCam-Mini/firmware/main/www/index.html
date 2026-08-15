@@ -184,11 +184,10 @@ input[type=range]{width:100%;accent-color:var(--accent)}
      margin-top:10px;display:none}
 #bar div{height:100%;width:0;background:var(--accent);transition:width .2s}
 
-/* chrome auto-hide (fullscreen) */
-#topbar,#chips,#scalebar{transition:opacity .3s,transform .3s}
+/* chrome auto-hide (fullscreen): only the menu bar retreats - the temperature
+   readouts and scale stay up, floating over the image like a real imager's HUD */
+#topbar{transition:opacity .3s,transform .3s}
 body.hidechrome #topbar{opacity:0;transform:translateY(-10px);pointer-events:none}
-body.hidechrome #chips{opacity:0;transform:translateY(10px);pointer-events:none}
-body.hidechrome #scalebar{opacity:0;pointer-events:none}
 
 /* recording state */
 #recChip{display:none;align-items:center;gap:7px;padding:6px 11px;border-radius:9px;
@@ -1456,7 +1455,46 @@ function pollStatus(){
   }).catch(function(){});
 }
 
+/* ==================== keep the screen awake while viewing ==================== */
+// A thermal camera you have to keep tapping to stop the phone sleeping is
+// useless for observation.  The standard Wake Lock API needs a secure context,
+// so it covers the https version; on plain http a muted, invisible 1 fps video
+// (fed from a 2x2 canvas stream) keeps mobile screens on - the classic player
+// trick.  Re-acquired whenever the tab becomes visible again, since the browser
+// releases the lock every time the page is hidden.
+var wakeLock=null, wakeVideo=null;
+
+function wakeOn(){
+  if(document.visibilityState!=="visible") return;
+  if("wakeLock" in navigator){
+    if(wakeLock) return;
+    navigator.wakeLock.request("screen").then(function(wl){
+      wakeLock=wl;
+      wl.addEventListener("release",function(){ wakeLock=null; });
+    }).catch(function(){});
+  }else{
+    if(!wakeVideo){
+      var c=document.createElement("canvas");
+      c.width=2; c.height=2;
+      c.getContext("2d").fillRect(0,0,2,2);
+      wakeVideo=document.createElement("video");
+      wakeVideo.muted=true;
+      wakeVideo.setAttribute("playsinline","");
+      wakeVideo.setAttribute("aria-hidden","true");
+      wakeVideo.style.cssText="position:fixed;left:-4px;top:-4px;width:2px;height:2px;opacity:0;pointer-events:none";
+      try{ wakeVideo.srcObject=c.captureStream(1); }catch(e){ wakeVideo=null; return; }
+      document.body.appendChild(wakeVideo);
+    }
+    wakeVideo.play().catch(function(){});
+  }
+}
+
+document.addEventListener("visibilitychange",wakeOn);
+// The video fallback may need a user gesture before play() is allowed
+document.addEventListener("pointerdown",wakeOn);
+
 /* ============================== boot ============================== */
+wakeOn();
 pollStatus();
 // Cheap: a few hundred bytes every five seconds, next to 53 KB image frames
 setInterval(pollStatus,5000);
