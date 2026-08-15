@@ -70,7 +70,7 @@ void app_main(void)
     }
     
     // Pre-allocate big buffers
-    if (!system_buffer_init()) {
+    if (!system_buffer_init(if_mode)) {
     	ESP_LOGE(TAG, "Memory allocate failed");
     	ctrl_set_fault_type(CTRL_FAULT_MEM_INIT);
     	while (1) {vTaskDelay(pdMS_TO_TICKS(100));}
