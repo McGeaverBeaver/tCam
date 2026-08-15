@@ -22,6 +22,7 @@
  *
  */
 #include "cert_utilities.h"
+#include "ps_utilities.h"
 #include "esp_log.h"
 #include "esp_system.h"
 #include "nvs_flash.h"
@@ -29,6 +30,7 @@
 #include "mbedtls/ctr_drbg.h"
 #include "mbedtls/ecp.h"
 #include "mbedtls/entropy.h"
+#include "mbedtls/oid.h"
 #include "mbedtls/pk.h"
 #include "mbedtls/x509_crt.h"
 #include "freertos/FreeRTOS.h"
@@ -45,6 +47,14 @@
 #define CERT_NVS_CERT_KEY  "cert_pem"
 #define CERT_NVS_PKEY_KEY  "pkey_pem"
 
+// Identity a stored certificate was issued for.  Bumping the leading version
+// invalidates every previously stored certificate, which is how a change to the
+// generation code (new extensions, different key type) gets rolled out to
+// cameras that already have one.
+#define CERT_NVS_IDENT_KEY "ident"
+#define CERT_FORMAT_VERSION 2
+#define CERT_IDENT_MAX_LEN 64
+
 #define CERT_PEM_MAX_LEN   2048
 #define KEY_PEM_MAX_LEN    1024
 
@@ -54,7 +64,14 @@
 #define CERT_NOT_BEFORE "20200101000000"
 #define CERT_NOT_AFTER  "20500101000000"
 
-#define CERT_SUBJECT "CN=tCam-Mini,O=tCam"
+// Extended key usage: id-kp-serverAuth (1.3.6.1.5.5.7.3.1), DER-encoded by hand
+// as SEQUENCE { OID }.  Built literally rather than through
+// mbedtls_x509write_crt_set_ext_key_usage() so this does not depend on an API
+// that differs between mbedTLS 2.x and 3.x.
+static const unsigned char EKU_SERVER_AUTH_DER[] = {
+	0x30, 0x0A,                                            // SEQUENCE, 10 bytes
+	0x06, 0x08, 0x2B, 0x06, 0x01, 0x05, 0x05, 0x07, 0x03, 0x01
+};
 
 // Stack for the temporary generation task.  mbedTLS EC point multiplication uses
 // several KB of stack temporaries; running it on a caller's (smaller) stack
@@ -73,6 +90,11 @@ static unsigned char* key_buf = NULL;
 static size_t cert_buf_len = 0;    // includes null terminator
 static size_t key_buf_len = 0;     // includes null terminator
 
+// Identity the certificate being generated / just loaded is for
+static char cert_host[PS_SSID_MAX_LEN+1];
+static unsigned char cert_ip[4];
+static char cert_ident[CERT_IDENT_MAX_LEN];
+
 
 //
 // Cert Utilities forward declarations
@@ -80,6 +102,8 @@ static size_t key_buf_len = 0;     // includes null terminator
 static bool cert_load_from_nvs();
 static bool cert_generate();
 static bool cert_store_to_nvs();
+static bool cert_verify();
+static int build_san(unsigned char* out, size_t out_len);
 
 
 //
@@ -97,12 +121,20 @@ static void cert_gen_task(void* arg)
 }
 
 
-bool cert_get(const unsigned char** cert_pem, size_t* cert_len,
+bool cert_get(const char* host, const unsigned char* ip4,
+              const unsigned char** cert_pem, size_t* cert_len,
               const unsigned char** key_pem, size_t* key_len)
 {
+	// Record the identity this certificate must be valid for
+	strncpy(cert_host, (host != NULL) ? host : "tCam-Mini", PS_SSID_MAX_LEN);
+	cert_host[PS_SSID_MAX_LEN] = 0;
+	memcpy(cert_ip, ip4, 4);
+	snprintf(cert_ident, sizeof(cert_ident), "%d|%s|%d.%d.%d.%d", CERT_FORMAT_VERSION,
+	         cert_host, cert_ip[0], cert_ip[1], cert_ip[2], cert_ip[3]);
+
 	if (cert_buf == NULL) {
 		if (!cert_load_from_nvs()) {
-			ESP_LOGI(TAG, "No stored certificate - generating (this happens once)");
+			ESP_LOGI(TAG, "Issuing certificate for %s (this takes a moment)", cert_ident);
 
 			// Run generation on a dedicated task with a stack sized for EC math,
 			// then reclaim it - callers keep their small permanent stacks
@@ -129,6 +161,16 @@ bool cert_get(const unsigned char** cert_pem, size_t* cert_len,
 				ESP_LOGE(TAG, "Could not persist certificate");
 			}
 		}
+
+		// Parse back what we are about to hand the TLS stack.  A certificate the
+		// server cannot use produces a bare "no usable ciphersuite" handshake
+		// failure with no indication of why, so check it here where the reason
+		// can actually be reported.
+		if (!cert_verify()) {
+			free(cert_buf); cert_buf = NULL;
+			free(key_buf);  key_buf = NULL;
+			return false;
+		}
 	}
 
 	*cert_pem = cert_buf;
@@ -145,12 +187,23 @@ bool cert_get(const unsigned char** cert_pem, size_t* cert_len,
 //
 static bool cert_load_from_nvs()
 {
+	char stored_ident[CERT_IDENT_MAX_LEN];
 	esp_err_t err;
 	nvs_handle_t h;
-	size_t clen = 0, klen = 0;
+	size_t clen = 0, klen = 0, ilen = sizeof(stored_ident);
 
 	err = nvs_open(CERT_NVS_NAMESPACE, NVS_READONLY, &h);
 	if (err != ESP_OK) return false;
+
+	// A certificate issued for a different name, address or format version is of
+	// no use - browsers validate against subjectAltName, so a stale one would
+	// produce a name mismatch on every visit
+	if ((nvs_get_str(h, CERT_NVS_IDENT_KEY, stored_ident, &ilen) != ESP_OK) ||
+	    (strcmp(stored_ident, cert_ident) != 0)) {
+		ESP_LOGI(TAG, "Stored certificate does not match %s - reissuing", cert_ident);
+		nvs_close(h);
+		return false;
+	}
 
 	if ((nvs_get_blob(h, CERT_NVS_CERT_KEY, NULL, &clen) != ESP_OK) ||
 	    (nvs_get_blob(h, CERT_NVS_PKEY_KEY, NULL, &klen) != ESP_OK) ||
@@ -203,6 +256,9 @@ static bool cert_generate()
 	mbedtls_pk_context key;
 	mbedtls_x509write_cert crt;
 	unsigned char serial_bytes[16];
+	unsigned char san[160];
+	int san_len;
+	char subject[96];
 	const char* pers = "tcam_cert_gen";
 
 	mbedtls_entropy_init(&entropy);
@@ -243,14 +299,43 @@ static bool cert_generate()
 
 	ret = mbedtls_x509write_crt_set_serial(&crt, &serial);
 	if (ret != 0) { ESP_LOGE(TAG, "set serial failed (-0x%04x)", -ret); goto done; }
-	ret = mbedtls_x509write_crt_set_subject_name(&crt, CERT_SUBJECT);
+
+	snprintf(subject, sizeof(subject), "CN=%s,O=tCam", cert_host);
+	ret = mbedtls_x509write_crt_set_subject_name(&crt, subject);
 	if (ret != 0) { ESP_LOGE(TAG, "subject failed (-0x%04x)", -ret); goto done; }
-	ret = mbedtls_x509write_crt_set_issuer_name(&crt, CERT_SUBJECT);
+	ret = mbedtls_x509write_crt_set_issuer_name(&crt, subject);
 	if (ret != 0) { ESP_LOGE(TAG, "issuer failed (-0x%04x)", -ret); goto done; }
 	ret = mbedtls_x509write_crt_set_validity(&crt, CERT_NOT_BEFORE, CERT_NOT_AFTER);
 	if (ret != 0) { ESP_LOGE(TAG, "validity failed (-0x%04x)", -ret); goto done; }
 	ret = mbedtls_x509write_crt_set_basic_constraints(&crt, 0, -1);
 	if (ret != 0) { ESP_LOGE(TAG, "constraints failed (-0x%04x)", -ret); goto done; }
+
+	// subjectAltName.  Chrome and Safari ignore the common name entirely and
+	// validate the hostname against SAN, so without this the certificate is
+	// rejected outright rather than merely warned about.
+	san_len = build_san(san, sizeof(san));
+	if (san_len <= 0) { ESP_LOGE(TAG, "SAN build failed"); goto done; }
+	ret = mbedtls_x509write_crt_set_extension(&crt,
+			MBEDTLS_OID_SUBJECT_ALT_NAME, MBEDTLS_OID_SIZE(MBEDTLS_OID_SUBJECT_ALT_NAME),
+			0, san, san_len);
+	if (ret != 0) { ESP_LOGE(TAG, "SAN failed (-0x%04x)", -ret); goto done; }
+
+	// keyUsage must include digitalSignature: with ECDHE-ECDSA the server signs
+	// the key exchange with this key, and mbedTLS rejects a certificate whose
+	// keyUsage is present but lacks the bit the ciphersuite needs
+	ret = mbedtls_x509write_crt_set_key_usage(&crt,
+			MBEDTLS_X509_KU_DIGITAL_SIGNATURE | MBEDTLS_X509_KU_KEY_AGREEMENT);
+	if (ret != 0) { ESP_LOGE(TAG, "key usage failed (-0x%04x)", -ret); goto done; }
+
+	ret = mbedtls_x509write_crt_set_extension(&crt,
+			MBEDTLS_OID_EXTENDED_KEY_USAGE, MBEDTLS_OID_SIZE(MBEDTLS_OID_EXTENDED_KEY_USAGE),
+			0, EKU_SERVER_AUTH_DER, sizeof(EKU_SERVER_AUTH_DER));
+	if (ret != 0) { ESP_LOGE(TAG, "ext key usage failed (-0x%04x)", -ret); goto done; }
+
+	ret = mbedtls_x509write_crt_set_subject_key_identifier(&crt);
+	if (ret != 0) { ESP_LOGE(TAG, "subject key id failed (-0x%04x)", -ret); goto done; }
+	ret = mbedtls_x509write_crt_set_authority_key_identifier(&crt);
+	if (ret != 0) { ESP_LOGE(TAG, "authority key id failed (-0x%04x)", -ret); goto done; }
 
 	ret = mbedtls_x509write_crt_pem(&crt, cert_buf, CERT_PEM_MAX_LEN,
 	                                mbedtls_ctr_drbg_random, &ctr_drbg);
@@ -289,6 +374,7 @@ static bool cert_store_to_nvs()
 
 	if ((nvs_set_blob(h, CERT_NVS_CERT_KEY, cert_buf, cert_buf_len) != ESP_OK) ||
 	    (nvs_set_blob(h, CERT_NVS_PKEY_KEY, key_buf, key_buf_len) != ESP_OK) ||
+	    (nvs_set_str(h, CERT_NVS_IDENT_KEY, cert_ident) != ESP_OK) ||
 	    (nvs_commit(h) != ESP_OK)) {
 		nvs_close(h);
 		return false;
@@ -297,4 +383,109 @@ static bool cert_store_to_nvs()
 	nvs_close(h);
 	ESP_LOGI(TAG, "Certificate stored");
 	return true;
+}
+
+
+/**
+ * Build the DER value of a subjectAltName extension covering the ways a browser
+ * can reach this camera: its mDNS name, its bare hostname, and its current IP.
+ *
+ *   GeneralNames ::= SEQUENCE OF GeneralName
+ *   GeneralName  ::= [2] IMPLICIT IA5String   (dNSName)
+ *                  | [7] IMPLICIT OCTET STRING (iPAddress)
+ *
+ * Encoded by hand because mbedtls_x509write_crt_set_subject_alternative_name()
+ * does not exist in every mbedTLS version ESP-IDF has shipped, whereas
+ * set_extension() with a literal DER value works on all of them.  Lengths stay
+ * under 128 bytes so single-byte DER length encoding is always valid here.
+ *
+ * Returns the number of bytes written, or -1 if the buffer is too small.
+ */
+static int build_san(unsigned char* out, size_t out_len)
+{
+	char local_name[PS_SSID_MAX_LEN + 8];
+	int host_len, local_len;
+	size_t body_len, total;
+	unsigned char* p;
+
+	snprintf(local_name, sizeof(local_name), "%s.local", cert_host);
+	host_len = strlen(cert_host);
+	local_len = strlen(local_name);
+
+	// SEQUENCE header (2) + dNSName x2 (2 + len each) + iPAddress (2 + 4)
+	body_len = (2 + local_len) + (2 + host_len) + (2 + 4);
+	total = 2 + body_len;
+	if ((body_len > 127) || (total > out_len)) return -1;
+
+	p = out;
+	*p++ = 0x30;                     // SEQUENCE
+	*p++ = (unsigned char) body_len;
+
+	*p++ = 0x82;                     // [2] dNSName
+	*p++ = (unsigned char) local_len;
+	memcpy(p, local_name, local_len);
+	p += local_len;
+
+	*p++ = 0x82;                     // [2] dNSName
+	*p++ = (unsigned char) host_len;
+	memcpy(p, cert_host, host_len);
+	p += host_len;
+
+	*p++ = 0x87;                     // [7] iPAddress
+	*p++ = 4;
+	memcpy(p, cert_ip, 4);
+	p += 4;
+
+	return (int) (p - out);
+}
+
+
+/**
+ * Parse the certificate and key back and confirm they are usable as a TLS server
+ * identity.  This is cheap insurance against a silent failure mode: if the stack
+ * cannot use the certificate, the only symptom at handshake time is
+ * MBEDTLS_ERR_SSL_NO_USABLE_CIPHERSUITE, which says nothing about the cause.
+ */
+static bool cert_verify()
+{
+	bool ok = false;
+	int ret;
+	mbedtls_pk_context pk;
+	mbedtls_x509_crt crt;
+
+	mbedtls_x509_crt_init(&crt);
+	mbedtls_pk_init(&pk);
+
+	ret = mbedtls_x509_crt_parse(&crt, cert_buf, cert_buf_len);
+	if (ret != 0) {
+		ESP_LOGE(TAG, "certificate does not parse (-0x%04x)", -ret);
+		goto done;
+	}
+
+	ret = mbedtls_pk_parse_key(&pk, key_buf, key_buf_len, NULL, 0);
+	if (ret != 0) {
+		ESP_LOGE(TAG, "private key does not parse (-0x%04x)", -ret);
+		goto done;
+	}
+
+	if (!mbedtls_pk_can_do(&crt.pk, MBEDTLS_PK_ECDSA)) {
+		ESP_LOGE(TAG, "certificate key cannot do ECDSA - no ECDHE-ECDSA ciphersuite "
+		              "will be usable");
+		goto done;
+	}
+
+	if (mbedtls_pk_ec(crt.pk)->grp.id != MBEDTLS_ECP_DP_SECP256R1) {
+		ESP_LOGE(TAG, "certificate is on curve %d, not secp256r1",
+		         (int) mbedtls_pk_ec(crt.pk)->grp.id);
+		goto done;
+	}
+
+	ESP_LOGI(TAG, "Certificate OK: %s, ECDSA/secp256r1, %d byte PEM",
+	         cert_ident, (int) cert_buf_len);
+	ok = true;
+
+done:
+	mbedtls_pk_free(&pk);
+	mbedtls_x509_crt_free(&crt);
+	return ok;
 }

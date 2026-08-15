@@ -231,10 +231,20 @@ static void start_https_server()
 	const unsigned char* cert_pem;
 	const unsigned char* key_pem;
 	esp_err_t ret;
+	net_info_t* net_infoP = (*net_get_info)();
 	size_t cert_len, key_len;
+	unsigned char ip4[4];
 	httpd_ssl_config_t conf = HTTPD_SSL_CONFIG_DEFAULT();
 
-	if (!cert_get(&cert_pem, &cert_len, &key_pem, &key_len)) {
+	// cur_ip_addr index 3 holds the first octet (see ps_utilities)
+	ip4[0] = net_infoP->cur_ip_addr[3];
+	ip4[1] = net_infoP->cur_ip_addr[2];
+	ip4[2] = net_infoP->cur_ip_addr[1];
+	ip4[3] = net_infoP->cur_ip_addr[0];
+
+	// The certificate is issued for the name and address the camera is actually
+	// reachable on, and reissued if either changes
+	if (!cert_get(net_infoP->ap_ssid, ip4, &cert_pem, &cert_len, &key_pem, &key_len)) {
 		ESP_LOGE(TAG, "No certificate available - HTTPS disabled");
 		return;
 	}

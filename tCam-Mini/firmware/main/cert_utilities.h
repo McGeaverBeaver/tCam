@@ -43,8 +43,14 @@
  * null terminator, as the esp-tls stack expects for PEM input.  Buffers are
  * heap-allocated and owned by this module; they remain valid for the life of the
  * system.  Returns false if generation or storage fails.
+ *
+ * host is the camera name (used for the CN and for <host>.local) and ip4 is the
+ * address the camera is currently reachable on.  Both go into the certificate's
+ * subjectAltName; a stored certificate issued for a different name or address is
+ * discarded and reissued, since browsers match against SAN and ignore CN.
  */
-bool cert_get(const unsigned char** cert_pem, size_t* cert_len,
+bool cert_get(const char* host, const unsigned char* ip4,
+              const unsigned char** cert_pem, size_t* cert_len,
               const unsigned char** key_pem, size_t* key_len);
 
 #endif /* CERT_UTILITIES_H */
