@@ -246,12 +246,16 @@ static void start_https_server()
 	conf.prvtkey_len = key_len;
 
 	conf.httpd.ctrl_port         = 32769;              // distinct from the HTTP instance
-	conf.httpd.max_open_sockets  = 2;                  // TLS sessions are expensive; one
-	                                                   // viewer plus one spare is plenty
+	// A browser opens several connections at once and each TLS handshake costs
+	// most of a second on this part.  With only two slots the server spent its
+	// time purging half-finished handshakes, which the client saw as connection
+	// resets.  The per-session buffers come from PSRAM now, so slots are cheap.
+	conf.httpd.max_open_sockets  = 4;
 	conf.httpd.lru_purge_enable  = true;
 	conf.httpd.uri_match_fn      = httpd_uri_match_wildcard;
-	conf.httpd.recv_wait_timeout = 15;
-	conf.httpd.send_wait_timeout = 15;
+	// Generous relative to the ~750 mSec an ECDHE handshake takes here
+	conf.httpd.recv_wait_timeout = 30;
+	conf.httpd.send_wait_timeout = 30;
 	// Note: no custom close_fn here - esp_https_server owns session teardown for
 	// TLS sockets.  A browser that vanishes is released when its next WebSocket
 	// send fails instead.
