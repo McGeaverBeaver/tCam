@@ -70,4 +70,11 @@ bool web_cmd_connected();
  */
 int web_cmd_send(char* buf, int len);
 
+/**
+ * Send a raw binary frame (see build_binary_image in rsp_task for the layout)
+ * to the connected browser.  Returns bytes sent or -1 on error.  Safe to call
+ * from any task.
+ */
+int web_cmd_send_binary(char* buf, int len);
+
 #endif /* WEB_CMD_H */

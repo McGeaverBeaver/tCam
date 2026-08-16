@@ -156,6 +156,45 @@ int web_cmd_send(char* buf, int len)
 }
 
 
+int web_cmd_send_binary(char* buf, int len)
+{
+	esp_err_t ret;
+	httpd_ws_frame_t frame;
+	httpd_handle_t hd;
+	int fd;
+
+	if (len <= 0) return 0;
+	if (web_mutex == NULL) return -1;
+
+	xSemaphoreTake(web_mutex, portMAX_DELAY);
+	hd = ws_hd;
+	fd = ws_fd;
+
+	if (fd < 0) {
+		xSemaphoreGive(web_mutex);
+		return -1;
+	}
+
+	memset(&frame, 0, sizeof(frame));
+	frame.type    = HTTPD_WS_TYPE_BINARY;
+	frame.payload = (uint8_t*) buf;
+	frame.len     = len;
+	frame.final   = true;
+
+	ret = httpd_ws_send_frame_async(hd, fd, &frame);
+
+	xSemaphoreGive(web_mutex);
+
+	if (ret != ESP_OK) {
+		ESP_LOGE(TAG, "ws binary send failed (%d)", ret);
+		web_cmd_clear_client();
+		return -1;
+	}
+
+	return len;
+}
+
+
 void web_cmd_close_fn(httpd_handle_t hd, int sockfd)
 {
 	bool was_client;

@@ -31,6 +31,8 @@
 #include "rsp_task.h"
 #include "cmd_utilities.h"
 #include "json_utilities.h"
+#include "vospi.h"
+#include "web_cmd.h"
 #include "sif_utilities.h"
 #include "sys_utilities.h"
 #include "upd_utilities.h"
@@ -113,6 +115,7 @@ static void eval_stream_ready();
 static void handle_notifications();
 static void process_notifications(uint32_t notification_value);
 static int process_image(int n);
+static int build_binary_image(int n);
 static void send_response(char* rsp, int len, bool ser_mode);
 static bool cmd_response_available();
 static int get_cmd_response();
@@ -168,23 +171,31 @@ void rsp_task()
 			}
 		}
 		
-		// Look for things to send
+		// Look for things to send.  A browser on the WebSocket gets the frame as
+		// raw binary: base64-wrapped json exists for the legacy TCP protocol, and
+		// carrying it over the WebSocket taxed every frame ~37% extra bytes plus a
+		// base64 encode here and a decode in the browser.  The web UI ships inside
+		// the firmware, so the two sides can never disagree about the format.
+		{
+			bool ws_binary = (if_type != CTRL_IF_MODE_SIF) &&
+			                 (client_if_active() == CLIENT_IF_WS);
+
 		if (got_image_0 || got_image_1) {
 			if (connected) {
 				if (got_image_0) {
-					len = process_image(0);
+					len = ws_binary ? build_binary_image(0) : process_image(0);
 					got_image_0 = false;
 #ifdef LOG_IMG_TIMESTAMP
 					ESP_LOGI(TAG, "process image 0");
 #endif
 				} else {
-					len = process_image(1);
+					len = ws_binary ? build_binary_image(1) : process_image(1);
 					got_image_1 = false;
 #ifdef LOG_IMG_TIMESTAMP
 					ESP_LOGI(TAG, "process image 1");
 #endif
-				}	
-					
+				}
+
 				// Send the image
 				if (len != 0) {
 					if (if_type == CTRL_IF_MODE_SIF) {
@@ -196,10 +207,15 @@ void rsp_task()
 					} else if (!web_ota_in_progress()) {
 						// Frames are still consumed above so lep_task is never held
 						// up, but they are dropped rather than transmitted while a
-						// firmware image is uploading.  Roughly 53 KB of json per
-						// frame competing with the upload is the difference between
-						// a quick update and a stalled one.
-						send_response(sys_image_rsp_buffer.bufferP, sys_image_rsp_buffer.length, false);
+						// firmware image is uploading - a full frame competing with
+						// the upload is the difference between a quick update and a
+						// stalled one.
+						if (ws_binary) {
+							(void) web_cmd_send_binary(sys_image_rsp_buffer.bufferP,
+							                           sys_image_rsp_buffer.length);
+						} else {
+							send_response(sys_image_rsp_buffer.bufferP, sys_image_rsp_buffer.length, false);
+						}
 					}
 				}
 				
@@ -210,6 +226,7 @@ void rsp_task()
 					}
 				}
 			}
+		}
 		}
 		
 		if (cmd_response_available()) {
@@ -769,4 +786,57 @@ static void send_get_fw()
 	}
 	
 	xSemaphoreGive(sys_cmd_response_buffer.mutex);
+}
+
+
+/**
+ * Build a raw binary frame for the browser client.  Layout, all little-endian
+ * (native for both the ESP32 and every browser this meets):
+ *
+ *   offset 0   'T' 'C' 'A' 'M'      magic
+ *   offset 4   u8  version (1)
+ *   offset 5   u8  flags: bit 0 = telemetry present
+ *   offset 6   u16 telemetry length in bytes
+ *   offset 8   u32 radiometric length in bytes
+ *   offset 12  telemetry words (starts on an even offset; 12 + the even
+ *              telemetry length keeps the radiometric data aligned too, so the
+ *              browser can view both directly as Uint16Array without a copy)
+ *   ...        radiometric words
+ *
+ * Compared to the json path this drops the ~37% base64 expansion, the per-frame
+ * base64 encode on this core and decode in the browser, and the per-frame cJSON
+ * allocation churn.  The legacy TCP protocol is untouched - this format only
+ * travels over the WebSocket, whose client ships inside the same firmware image.
+ */
+static int build_binary_image(int n)
+{
+	int len;
+	uint8_t* p = (uint8_t*) sys_image_rsp_buffer.bufferP;
+	uint16_t tlen;
+	uint32_t rlen = LEP_NUM_PIXELS * 2;
+
+	xSemaphoreTake(rsp_lep_buffer[n].lep_mutex, portMAX_DELAY);
+
+	tlen = rsp_lep_buffer[n].telem_valid ? (LEP_TEL_WORDS * 2) : 0;
+
+	p[0] = 'T'; p[1] = 'C'; p[2] = 'A'; p[3] = 'M';
+	p[4] = 1;
+	p[5] = (tlen != 0) ? 0x01 : 0x00;
+	p[6] = (uint8_t) (tlen & 0xFF);
+	p[7] = (uint8_t) (tlen >> 8);
+	p[8]  = (uint8_t) (rlen & 0xFF);
+	p[9]  = (uint8_t) ((rlen >> 8) & 0xFF);
+	p[10] = (uint8_t) ((rlen >> 16) & 0xFF);
+	p[11] = (uint8_t) ((rlen >> 24) & 0xFF);
+
+	if (tlen != 0) {
+		memcpy(p + 12, rsp_lep_buffer[n].lep_telemP, tlen);
+	}
+	memcpy(p + 12 + tlen, rsp_lep_buffer[n].lep_bufferP, rlen);
+
+	xSemaphoreGive(rsp_lep_buffer[n].lep_mutex);
+
+	len = 12 + tlen + rlen;
+	sys_image_rsp_buffer.length = len;
+	return len;
 }

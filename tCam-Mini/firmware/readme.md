@@ -18,6 +18,13 @@ To monitor diagnostic information from the firmware: ```idf.py -p PORT```.  Outp
 
 ### Revision History
 
+#### FW 4.1
+FW revision 4.1 is a streaming efficiency release.
+
+1. The web UI receives image frames as raw binary over the WebSocket instead of base64 json - 27% fewer bytes per frame and no per-frame base64/cJSON work on either end.  The json protocol on port 5001 is unchanged; saved .tjsn files remain desktop-compatible.
+2. PSRAM clock raised from 40 to 80 MHz (all large buffers live there).  If a camera shows instability on marginal silicon, revert CONFIG_SPIRAM_SPEED_80M to 40M.
+3. Explicit "Switch to hotspot mode" control and static-address configuration in the Network tab.
+
 #### FW 4.0
 FW revision 4.0 makes the camera self-contained.
 

@@ -571,7 +571,7 @@ var PALETTES = {
 var ws=null, wsOK=false, reconnectTimer=null;
 var cv=document.getElementById("cv"), ctx=cv.getContext("2d");
 var lut=new Uint8Array(256*3);
-var raw=null, lastJson=null;
+var raw=null, lastJson=null, lastBin=null;
 var norm8=new Uint8Array(NPIX);
 var scaleS=2, img=null, sx0=null, sx1=null, sfx=null, sy0=null, sy1=null, sfy=null;
 var res=0.01, spotK=null, fpaC=null, houseC=null, effGain=null, emisPct=null;
@@ -844,22 +844,18 @@ function updateReadouts(){
 }
 
 /* ============================== frames ============================== */
-function onImage(m){
-  lastJson=m;
-  var bytes=b64ToU8(m.radiometric);
-  raw=new Uint16Array(bytes.buffer,0,NPIX);   // camera sends native little-endian
-
-  if(m.telemetry){
-    var t=new Uint16Array(b64ToU8(m.telemetry).buffer);
-    if(t.length>=240){
-      res    =(t[209]===0)?0.1:0.01;   // row C word 49
-      spotK  = t[210];                 // row C word 50
-      fpaC   = t[24]/100-273.15;       // row A word 24
-      houseC = t[26]/100-273.15;       // row A word 26
-      effGain= t[166];                 // row C word 6
-      emisPct= t[99]/8192*100;         // row B word 19
-    }
+function applyTelem(t){
+  if(t && t.length>=240){
+    res    =(t[209]===0)?0.1:0.01;   // row C word 49
+    spotK  = t[210];                 // row C word 50
+    fpaC   = t[24]/100-273.15;       // row A word 24
+    houseC = t[26]/100-273.15;       // row A word 26
+    effGain= t[166];                 // row C word 6
+    emisPct= t[99]/8192*100;         // row B word 19
   }
+}
+
+function frameDone(){
   frames++; fpsCount++;
   var now=Date.now();
   if(now-fpsT>=1000){
@@ -868,6 +864,33 @@ function onImage(m){
     fpsCount=0; fpsT=now;
   }
   render();
+}
+
+// Legacy json frame (base64 payloads) - kept so this page also works against
+// older firmware that streams the TCP-style json over the WebSocket
+function onImage(m){
+  lastJson=m; lastBin=null;
+  var bytes=b64ToU8(m.radiometric);
+  raw=new Uint16Array(bytes.buffer,0,NPIX);   // camera sends native little-endian
+  if(m.telemetry) applyTelem(new Uint16Array(b64ToU8(m.telemetry).buffer));
+  frameDone();
+}
+
+// Raw binary frame: 'TCAM' magic, u8 version, u8 flags, u16 telemetry bytes,
+// u32 radiometric bytes, then telemetry and radiometric words.  Offsets stay
+// even so both arrays are viewed in place with no copy and no base64 work.
+function onBinaryImage(ab){
+  if(ab.byteLength<12) return;
+  var dv=new DataView(ab);
+  if(dv.getUint8(0)!==0x54||dv.getUint8(1)!==0x43||
+     dv.getUint8(2)!==0x41||dv.getUint8(3)!==0x4D) return;   // 'TCAM'
+  if(dv.getUint8(4)!==1) return;                             // version
+  var tlen=dv.getUint16(6,true), rlen=dv.getUint32(8,true);
+  if((12+tlen+rlen)>ab.byteLength || rlen!==NPIX*2) return;
+  lastBin={buf:ab,tlen:tlen,rlen:rlen}; lastJson=null;
+  raw=new Uint16Array(ab,12+tlen,NPIX);
+  if(tlen) applyTelem(new Uint16Array(ab,12,tlen/2));
+  frameDone();
 }
 
 /* ============================== transport ============================== */
@@ -881,6 +904,7 @@ function send(cmd,args){
 function connect(){
   var url=(location.protocol==="https:"?"wss://":"ws://")+location.host+"/ws";
   try{ ws=new WebSocket(url); }catch(e){ scheduleReconnect(); return; }
+  ws.binaryType="arraybuffer";
 
   ws.onopen=function(){
     wsOK=true;
@@ -891,6 +915,7 @@ function connect(){
   };
 
   ws.onmessage=function(ev){
+    if(ev.data instanceof ArrayBuffer){ onBinaryImage(ev.data); return; }
     var m;
     try{ m=JSON.parse(ev.data); }catch(e){ return; }
     if(m.radiometric){ onImage(m); return; }
@@ -1555,10 +1580,38 @@ document.addEventListener("keydown",function(e){
   else if(e.key==="o"||e.key==="O") $("bLayers").click();
   else if(e.key==="t"||e.key==="T") $("bScale").click();
 });
+// base64 of a byte view, chunked so String.fromCharCode never sees a huge arg list
+function b64FromU8(u8){
+  var s="", CH=32768;
+  for(var i=0;i<u8.length;i+=CH){
+    s+=String.fromCharCode.apply(null,u8.subarray(i,Math.min(i+CH,u8.length)));
+  }
+  return btoa(s);
+}
+
 $("snapRaw").onclick=function(){
-  if(!lastJson){ toast("No frame yet","err"); return; }
-  dl(new Blob([JSON.stringify(lastJson)],{type:"application/json"}),
-     "tcam-"+stamp()+".tjsn");
+  var payload=null;
+  if(lastBin){
+    // The stream is binary now, so the desktop-compatible .tjsn wrapper (base64
+    // radiometric + telemetry json) is reconstructed here at save time - the one
+    // moment the base64 cost is actually worth paying
+    var d=new Date(), p=function(n){return (n<10?"0":"")+n;};
+    var o={
+      metadata:{
+        "Camera":$("camname").textContent,
+        "Version":$("iVer").textContent,
+        "Time":p(d.getHours())+":"+p(d.getMinutes())+":"+p(d.getSeconds()),
+        "Date":(d.getMonth()+1)+"/"+d.getDate()+"/"+(d.getFullYear()%100)
+      },
+      radiometric:b64FromU8(new Uint8Array(lastBin.buf,12+lastBin.tlen,lastBin.rlen))
+    };
+    if(lastBin.tlen) o.telemetry=b64FromU8(new Uint8Array(lastBin.buf,12,lastBin.tlen));
+    payload=JSON.stringify(o);
+  }else if(lastJson){
+    payload=JSON.stringify(lastJson);
+  }
+  if(!payload){ toast("No frame yet","err"); return; }
+  dl(new Blob([payload],{type:"application/json"}),"tcam-"+stamp()+".tjsn");
 };
 function stamp(){
   var d=new Date(), p=function(n){return (n<10?"0":"")+n;};
