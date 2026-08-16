@@ -96,6 +96,22 @@ void web_task()
 
 	ESP_LOGI(TAG, "Start task");
 
+#ifndef WEB_VERBOSE_NET_LOGS
+	// Quiet the log lines that normal operation produces in bulk.  Every fresh
+	// browser aborts several TLS handshakes while its certificate warning is on
+	// screen, and esp-tls/httpd report each one as an error - technically true,
+	// practically noise that has repeatedly been mistaken for a fault.  Warnings
+	// and errors from our own modules are unaffected; define WEB_VERBOSE_NET_LOGS
+	// (in web_task.h) to restore the full output when debugging TLS itself.
+	esp_log_level_set("esp-tls-mbedtls", ESP_LOG_NONE);
+	esp_log_level_set("esp_https_server", ESP_LOG_WARN);
+	esp_log_level_set("httpd", ESP_LOG_ERROR);
+	esp_log_level_set("httpd_txrx", ESP_LOG_ERROR);
+	esp_log_level_set("httpd_uri", ESP_LOG_ERROR);
+	esp_log_level_set("httpd_parse", ESP_LOG_ERROR);
+	ESP_LOGI(TAG, "Client-abort TLS log noise suppressed (WEB_VERBOSE_NET_LOGS restores it)");
+#endif
+
 	// The listening socket cannot be bound before the interface has an address
 	while (!(*net_is_connected)()) {
 		vTaskDelay(pdMS_TO_TICKS(500));

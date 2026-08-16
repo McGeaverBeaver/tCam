@@ -198,7 +198,12 @@ void lep_task()
 					// a FFC since that takes a long time.
 					if (++vsync_count == 36) {
 						vsync_count = 0;
-						ESP_LOGI(TAG, "Could not get lepton image");
+						// Expected in bursts: the Lepton stalls its video pipeline
+						// during a flat field correction (the periodic shutter
+						// click), and sync is re-established per the datasheet.
+						// Only a burst that never ends indicates a real problem,
+						// and that case escalates to a fault below.
+						ESP_LOGI(TAG, "Resynchronizing with Lepton (normal during FFC)");
 						
 						// Pause to allow resynchronization
 						// (Lepton 3.5 data sheet section 4.2.3.3.1 "Establishing/Re-Establishing Sync")

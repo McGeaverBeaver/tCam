@@ -36,6 +36,11 @@
 // Port the UI is served on.  80 so a bare address works with no port suffix.
 #define WEB_PORT 80
 
+// Define to restore the per-handshake TLS/httpd log output that normal browser
+// behavior (aborted handshakes while a certificate warning is on screen) fills
+// the log with.  Needed only when debugging the TLS stack itself.
+//#define WEB_VERBOSE_NET_LOGS
+
 // Stack for the server task.  Command handling runs cJSON in this context, so this
 // is well above the esp_http_server default.
 #define WEB_TASK_STACK_SIZE 6144
