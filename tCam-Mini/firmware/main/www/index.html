@@ -21,6 +21,11 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="color-scheme" content="dark">
 <meta name="theme-color" content="#07090d">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="apple-touch-icon" href="/icon-192.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="tCam">
 <link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2016%2016'%3E%3Cdefs%3E%3ClinearGradient%20id='g'%20x1='0'%20y1='1'%20x2='0'%20y2='0'%3E%3Cstop%20offset='0'%20stop-color='%233b1163'/%3E%3Cstop%20offset='.45'%20stop-color='%23c33b1e'/%3E%3Cstop%20offset='.8'%20stop-color='%23ff7a1a'/%3E%3Cstop%20offset='1'%20stop-color='%23ffd23c'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect%20width='16'%20height='16'%20rx='4'%20fill='url(%23g)'/%3E%3C/svg%3E">
 <title>tCam-Mini</title>
 <style>
@@ -174,13 +179,13 @@ input[type=range]{width:100%;accent-color:var(--accent)}
     border-bottom:1px solid var(--line)}
 .kv span:first-child{color:var(--dim)}
 .kv span:last-child{font-variant-numeric:tabular-nums;text-align:right;word-break:break-all}
-#nets{max-height:180px;overflow-y:auto;border:1px solid var(--line);border-radius:10px}
-#nets div{padding:10px 12px;cursor:pointer;border-bottom:1px solid var(--line);
+#nets,#cams{max-height:180px;overflow-y:auto;border:1px solid var(--line);border-radius:10px}
+#nets div,#cams div{padding:10px 12px;cursor:pointer;border-bottom:1px solid var(--line);
           display:flex;justify-content:space-between;gap:8px;font-size:13px}
-#nets div:last-child{border-bottom:none}
-#nets div:hover{background:rgba(255,255,255,.05)}
-#nets div.sel{color:var(--accent);background:var(--accent-soft)}
-#nets small{color:var(--dim)}
+#nets div:last-child,#cams div:last-child{border-bottom:none}
+#nets div:hover,#cams div:hover{background:rgba(255,255,255,.05)}
+#nets div.sel,#cams div.sel{color:var(--accent);background:var(--accent-soft);cursor:default}
+#nets small,#cams small{color:var(--dim)}
 #bar{height:5px;background:rgba(255,255,255,.07);border-radius:3px;overflow:hidden;
      margin-top:10px;display:none}
 #bar div{height:100%;width:0;background:var(--accent);transition:width .2s}
@@ -445,6 +450,18 @@ body.rec #bRec{background:rgba(255,77,74,.15);color:var(--err)}
       <input type="text" id="apssid" maxlength="32">
       <div class="hint">Also the access point name and the mDNS hostname.</div>
     </div>
+
+    <div class="sect">Cameras on this network</div>
+    <div class="row"><button class="btn" id="findBtn">Find other cameras</button></div>
+    <div class="row" id="camsWrap" style="display:none"><div id="cams"></div></div>
+    <div class="hint">The camera asks the network over mDNS — nothing is scanned or
+      contacted until you press the button, so it costs the live stream nothing.
+      Selecting a camera opens its interface.</div>
+
+    <div class="sect">Install as an app</div>
+    <div class="row"><button class="btn" id="installBtn">Add to home screen</button></div>
+    <div class="hint" id="installHint">Installs a home screen icon that opens this camera
+      directly, without browser chrome.</div>
 
     <div class="sect">Join a network</div>
     <div class="row"><button class="btn" id="scanBtn">Scan for networks</button></div>
@@ -1137,6 +1154,81 @@ $("scanBtn").onclick=function(){
   }).catch(function(){ toast("Scan failed","err"); })
   .then(function(){ b.disabled=false; b.textContent="Scan for networks"; });
 };
+
+/* ==================== camera discovery + app install ==================== */
+// Remember cameras we have seen.  An installed app launches at the origin it was
+// installed from, so if that camera's DHCP address changed the launch fails -
+// this list gives the user somewhere to go from any other reachable camera.
+function rememberCamera(name,ip){
+  var seen={};
+  try{ seen=JSON.parse(store.get("cams","{}"))||{}; }catch(e){}
+  seen[name]={ip:ip,t:Date.now()};
+  store.set("cams",JSON.stringify(seen));
+}
+
+function renderCameras(list){
+  var box=$("cams");
+  box.innerHTML="";
+  var here=location.hostname;
+  list.forEach(function(c){
+    var isSelf=(c.ip===here)||(c.host && (c.host+".local")===here);
+    var el=document.createElement("div");
+    el.innerHTML="<span>"+c.name.replace(/[<>&]/g,"")+(isSelf?" · this camera":"")+
+                 "</span><small>"+c.ip+(c.version?" · v"+c.version:"")+"</small>";
+    if(isSelf){ el.classList.add("sel"); }
+    else{
+      el.onclick=function(){
+        // Preserve the scheme so an https session does not drop to http
+        location.href=location.protocol+"//"+c.ip+"/";
+      };
+    }
+    box.appendChild(el);
+    rememberCamera(c.name,c.ip);
+  });
+  if(!box.children.length) box.innerHTML='<div><small>No other cameras found</small></div>';
+  $("camsWrap").style.display="block";
+}
+
+$("findBtn").onclick=function(){
+  var b=this;
+  b.disabled=true; b.textContent="Searching…";
+  fetch("/api/discover",{cache:"no-store"}).then(function(r){return r.json();})
+  .then(function(d){ renderCameras(d.cameras||[]); })
+  .catch(function(){ toast("Discovery failed","err"); })
+  .then(function(){ b.disabled=false; b.textContent="Find other cameras"; });
+};
+
+// Chrome fires this only when it considers the app installable; a self-signed
+// certificate keeps that from happening, so the button falls back to telling the
+// user where the browser's own menu item is.
+var deferredInstall=null;
+window.addEventListener("beforeinstallprompt",function(e){
+  e.preventDefault();
+  deferredInstall=e;
+  $("installBtn").textContent="Install app";
+  $("installHint").textContent="Installs a home screen icon that opens this camera directly, without browser chrome.";
+});
+
+$("installBtn").onclick=function(){
+  if(deferredInstall){
+    deferredInstall.prompt();
+    deferredInstall=null;
+    return;
+  }
+  var ios=/iPad|iPhone|iPod/.test(navigator.userAgent);
+  $("installHint").innerHTML = ios
+    ? "In Safari, tap the <b>Share</b> button then <b>Add to Home Screen</b>. The icon opens this camera full screen."
+    : "Open your browser's <b>⋮ menu</b> and choose <b>Add to Home screen</b>. "+
+      "(Chrome reserves its one-tap install for sites with a certificate it already trusts, "+
+      "which a camera issuing its own cannot be — the menu item does the same job.)";
+  toast("See the note below the button","ok");
+};
+
+if(window.matchMedia && window.matchMedia("(display-mode: standalone)").matches){
+  $("installBtn").disabled=true;
+  $("installBtn").textContent="Installed";
+  $("installHint").textContent="Running as an installed app.";
+}
 
 $("applyNet").onclick=function(){
   var f=(netFlags | 0x01) & ~0x80;

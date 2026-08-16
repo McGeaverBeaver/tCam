@@ -20,13 +20,22 @@ if(Python3_Interpreter_FOUND)
     if(NOT WEB_GZ_RESULT EQUAL 0)
         message(WARNING "Could not compress web UI - using the committed index.html.gz")
     endif()
+    # Web app icons.  Both scripts rewrite their output only when the bytes
+    # change, so an untouched UI does not force a relink.
+    execute_process(
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/make_icons.py
+        RESULT_VARIABLE WEB_ICON_RESULT
+    )
+    if(NOT WEB_ICON_RESULT EQUAL 0)
+        message(WARNING "Could not generate icons - using the committed PNGs")
+    endif()
 else()
-    message(WARNING "Python not found - using the committed index.html.gz")
+    message(WARNING "Python not found - using the committed index.html.gz and icons")
 endif()
 
 idf_component_register(SRCS ${SOURCES}
                     INCLUDE_DIRS .
                     REQUIRES clock cmd i2c lepton sys app_update esp_http_server esp_https_server mbedtls nvs_flash mdns
-                    EMBED_FILES "www/index.html.gz")
+                    EMBED_FILES "www/index.html.gz" "www/icon-192.png" "www/icon-512.png")
 
 target_compile_definitions(${COMPONENT_LIB} PRIVATE LV_CONF_INCLUDE_SIMPLE=1)

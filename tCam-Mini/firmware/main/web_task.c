@@ -41,6 +41,7 @@
 #include "esp_https_server.h"
 #include "esp_ota_ops.h"
 #include "esp_wifi.h"
+#include "mdns.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include <string.h>
@@ -55,6 +56,13 @@
 
 // Upper bound on networks returned by a scan
 #define SCAN_MAX_AP 20
+
+// Camera discovery.  Deliberately short and strictly on demand: mdns_query_ptr()
+// blocks the server task for its full timeout, so this must never run on a timer.
+// Image frames are unaffected either way - rsp_task sends them straight onto the
+// socket rather than through the server task.
+#define DISCOVER_TIMEOUT_MS 1500
+#define DISCOVER_MAX_RESULTS 8
 
 
 //
@@ -71,6 +79,10 @@ static volatile bool ota_active = false;
 // The UI, gzipped and linked in by EMBED_FILES in CMakeLists.txt
 extern const uint8_t index_html_gz_start[] asm("_binary_index_html_gz_start");
 extern const uint8_t index_html_gz_end[]   asm("_binary_index_html_gz_end");
+extern const uint8_t icon192_start[] asm("_binary_icon_192_png_start");
+extern const uint8_t icon192_end[]   asm("_binary_icon_192_png_end");
+extern const uint8_t icon512_start[] asm("_binary_icon_512_png_start");
+extern const uint8_t icon512_end[]   asm("_binary_icon_512_png_end");
 
 
 //
@@ -80,6 +92,9 @@ static esp_err_t index_get_handler(httpd_req_t* req);
 static esp_err_t status_get_handler(httpd_req_t* req);
 static esp_err_t scan_get_handler(httpd_req_t* req);
 static esp_err_t ota_post_handler(httpd_req_t* req);
+static esp_err_t manifest_get_handler(httpd_req_t* req);
+static esp_err_t icon_get_handler(httpd_req_t* req);
+static esp_err_t discover_get_handler(httpd_req_t* req);
 static esp_err_t redirect_handler(httpd_req_t* req, httpd_err_code_t err);
 static void register_handlers(httpd_handle_t hd);
 static bool start_webserver();
@@ -226,6 +241,23 @@ static void register_handlers(httpd_handle_t hd)
 		.uri = "/api/ota", .method = HTTP_POST, .handler = ota_post_handler, .user_ctx = NULL
 	};
 
+	static const httpd_uri_t manifest_uri = {
+		.uri = "/manifest.webmanifest", .method = HTTP_GET, .handler = manifest_get_handler, .user_ctx = NULL
+	};
+	static const httpd_uri_t icon192_uri = {
+		.uri = "/icon-192.png", .method = HTTP_GET, .handler = icon_get_handler, .user_ctx = (void*) 192
+	};
+	static const httpd_uri_t icon512_uri = {
+		.uri = "/icon-512.png", .method = HTTP_GET, .handler = icon_get_handler, .user_ctx = (void*) 512
+	};
+	static const httpd_uri_t discover_uri = {
+		.uri = "/api/discover", .method = HTTP_GET, .handler = discover_get_handler, .user_ctx = NULL
+	};
+
+	httpd_register_uri_handler(hd, &manifest_uri);
+	httpd_register_uri_handler(hd, &icon192_uri);
+	httpd_register_uri_handler(hd, &icon512_uri);
+	httpd_register_uri_handler(hd, &discover_uri);
 	httpd_register_uri_handler(hd, &index_uri);
 	httpd_register_uri_handler(hd, &status_uri);
 	httpd_register_uri_handler(hd, &scan_uri);
@@ -587,4 +619,130 @@ static esp_err_t redirect_handler(httpd_req_t* req, httpd_err_code_t err)
 	httpd_resp_send(req, NULL, 0);
 
 	return ESP_OK;
+}
+
+
+/**
+ * Web app manifest.  Generated rather than embedded so the installed app carries
+ * this camera's own name - with several cameras on a bench, identical home screen
+ * icons would be useless.
+ *
+ * Note on installability: a service worker (and therefore Chrome's full "Install
+ * app" flow) requires a trusted secure context, which a self-signed certificate
+ * is not.  Without one, Android offers "Add to Home screen" and iOS honours the
+ * apple-mobile-web-app meta tags in the page.  Both give a home screen icon that
+ * launches the UI chrome-free, which is the part that matters.  Offline caching
+ * is no loss here: the camera serves this app, so if the camera is unreachable
+ * there is nothing for a cached app to talk to.
+ */
+static esp_err_t manifest_get_handler(httpd_req_t* req)
+{
+	char buf[640];
+	int len;
+	net_info_t* net_infoP = (*net_get_info)();
+
+	len = snprintf(buf, sizeof(buf),
+		"{\"name\":\"%s Thermal Camera\",\"short_name\":\"%s\","
+		"\"start_url\":\"/\",\"scope\":\"/\",\"display\":\"standalone\","
+		"\"orientation\":\"any\",\"background_color\":\"#07090d\","
+		"\"theme_color\":\"#07090d\","
+		"\"description\":\"Live thermal viewer and configuration for %s\","
+		"\"icons\":["
+		"{\"src\":\"/icon-192.png\",\"sizes\":\"192x192\",\"type\":\"image/png\","
+		"\"purpose\":\"any maskable\"},"
+		"{\"src\":\"/icon-512.png\",\"sizes\":\"512x512\",\"type\":\"image/png\","
+		"\"purpose\":\"any maskable\"}]}",
+		net_infoP->ap_ssid, net_infoP->ap_ssid, net_infoP->ap_ssid);
+
+	httpd_resp_set_type(req, "application/manifest+json");
+	httpd_resp_set_hdr(req, "Cache-Control", "max-age=600");
+	return httpd_resp_send(req, buf, len);
+}
+
+
+static esp_err_t icon_get_handler(httpd_req_t* req)
+{
+	const uint8_t* start;
+	const uint8_t* end;
+
+	if ((int) req->user_ctx == 512) {
+		start = icon512_start; end = icon512_end;
+	} else {
+		start = icon192_start; end = icon192_end;
+	}
+
+	httpd_resp_set_type(req, "image/png");
+	// Icons ship with the firmware, so they can be cached until the next update
+	httpd_resp_set_hdr(req, "Cache-Control", "max-age=86400");
+	return httpd_resp_send(req, (const char*) start, end - start);
+}
+
+
+/**
+ * Find other tCam cameras on this network by asking mDNS for the service every
+ * camera already advertises.  The camera does the discovery rather than the
+ * browser because browsers cannot speak mDNS, and the alternative - having the
+ * page probe every address on the subnet - is both slow and hostile to the LAN.
+ *
+ * Strictly on demand.  mdns_query_ptr() blocks this task for its timeout, which
+ * would stutter other HTTP requests if it ran on a timer; image frames are not
+ * affected, because rsp_task writes them straight to the socket.
+ */
+static esp_err_t discover_get_handler(httpd_req_t* req)
+{
+	char entry[224];
+	esp_err_t ret;
+	int emitted = 0;
+	mdns_result_t* results = NULL;
+	mdns_result_t* r;
+
+	ret = mdns_query_ptr("_tcam-socket", "_tcp", DISCOVER_TIMEOUT_MS,
+	                     DISCOVER_MAX_RESULTS, &results);
+	if (ret != ESP_OK) {
+		ESP_LOGE(TAG, "mDNS discovery failed (%d)", ret);
+		httpd_resp_set_type(req, "application/json");
+		return httpd_resp_sendstr(req, "{\"error\":\"discovery failed\",\"cameras\":[]}");
+	}
+
+	httpd_resp_set_type(req, "application/json");
+	httpd_resp_sendstr_chunk(req, "{\"cameras\":[");
+
+	for (r = results; r != NULL; r = r->next) {
+		const char* version = "";
+		mdns_ip_addr_t* a;
+		size_t t;
+		uint32_t ip = 0;
+
+		// Only IPv4 is useful for building a URL the browser can open
+		for (a = r->addr; a != NULL; a = a->next) {
+			if (a->addr.type == ESP_IPADDR_TYPE_V4) {
+				ip = a->addr.u_addr.ip4.addr;
+				break;
+			}
+		}
+		if (ip == 0) continue;
+
+		for (t = 0; t < r->txt_count; t++) {
+			if ((r->txt[t].key != NULL) && (strcmp(r->txt[t].key, "version") == 0) &&
+			    (r->txt[t].value != NULL)) {
+				version = r->txt[t].value;
+			}
+		}
+
+		snprintf(entry, sizeof(entry),
+		         "%s{\"name\":\"%s\",\"host\":\"%s\",\"ip\":\"%d.%d.%d.%d\",\"version\":\"%s\"}",
+		         (emitted == 0) ? "" : ",",
+		         (r->instance_name != NULL) ? r->instance_name : "tCam",
+		         (r->hostname != NULL) ? r->hostname : "",
+		         (int) (ip & 0xFF), (int) ((ip >> 8) & 0xFF),
+		         (int) ((ip >> 16) & 0xFF), (int) ((ip >> 24) & 0xFF),
+		         version);
+		httpd_resp_sendstr_chunk(req, entry);
+		emitted++;
+	}
+
+	mdns_query_results_free(results);
+
+	httpd_resp_sendstr_chunk(req, "]}");
+	return httpd_resp_sendstr_chunk(req, NULL);
 }
