@@ -430,6 +430,11 @@ body.rec #bRec{background:rgba(255,77,74,.15);color:var(--err)}
     </div>
     <div class="hint">Raw saves the camera's own json frame (.tjsn), the same format the
       desktop application writes, so existing analysis tools read it.</div>
+    <div class="hint" style="margin-top:8px">Recordings and screenshots save to <b>this
+      device's</b> Downloads folder — the camera has no storage of its own. A recording is
+      written when you press stop; closing the tab mid-recording discards it. Note the
+      "sign in to network" popup browser cannot save downloads — for recording, open the
+      camera's address in your normal browser instead.</div>
   </div>
 
   <!-- NETWORK -->
@@ -1326,9 +1331,14 @@ function startRec(){
     if(MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(cands[i])){ mime=cands[i]; break; }
   }
 
+  // Thermal video is low-motion; 5 Mbps is visually transparent for upscaled
+  // 160x120 content.  This matters because recorded chunks accumulate in browser
+  // memory until stop is pressed - at 8 Mbps a long take could exhaust a phone
+  // tab, taking the recording with it.  ~5 Mbps is roughly 40 MB per minute.
+  var bps=5000000;
   try{
-    recorder=new MediaRecorder(stream, mime?{mimeType:mime,videoBitsPerSecond:8000000}
-                                           :{videoBitsPerSecond:8000000});
+    recorder=new MediaRecorder(stream, mime?{mimeType:mime,videoBitsPerSecond:bps}
+                                           :{videoBitsPerSecond:bps});
   }catch(e){ toast("Could not start recorder","err"); recorder=null; return; }
 
   recChunks=[];
