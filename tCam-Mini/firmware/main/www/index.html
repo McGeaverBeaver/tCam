@@ -475,12 +475,33 @@ body.rec #bRec{background:rgba(255,77,74,.15);color:var(--err)}
       <input type="password" id="stapw" maxlength="63" autocomplete="off">
     </div>
     <label class="chk"><input type="checkbox" id="stamode"><span>Join this network at startup</span></label>
-    <div class="hint">Unchecked, the camera broadcasts its own access point and you connect
-      straight to it. Checked, it joins your network and is reachable at
-      <b id="mdnsname">tcam-mini.local</b>. If it cannot join it falls back to its own access
-      point, so a wrong password is recoverable without a cable.</div>
+
+    <label class="chk"><input type="checkbox" id="staticEn"><span>Use a fixed address on that network</span></label>
+    <div class="row" id="staticBox" style="display:none">
+      <div class="grid2">
+        <input type="text" id="staip" placeholder="192.168.4.50" autocomplete="off">
+        <input type="text" id="stamask" placeholder="255.255.255.0" autocomplete="off">
+      </div>
+      <div class="hint">A fixed address is worth setting if you install this app to your home
+        screen: the installed icon opens whatever address it was installed from, so a camera
+        whose address moves has to be found again. Pick something outside your router's DHCP
+        pool. (A DHCP reservation in the router achieves the same thing.)</div>
+    </div>
+
     <div class="row" style="margin-top:12px">
       <button class="btn pri" id="applyNet">Save and restart networking</button>
+    </div>
+
+    <div class="sect">Hotspot mode</div>
+    <div class="row">
+      <button class="btn" id="apModeBtn">Switch to hotspot mode</button>
+      <div class="hint">Stops joining your network and makes the camera broadcast
+        <b id="apname">its own</b> WiFi again, reachable at <b id="apaddr">192.168.58.1</b>.
+        Use this before moving the camera somewhere else.
+        <br><br>Three other ways back, if this page is ever unreachable: the camera raises its
+        own hotspot automatically after about a minute of failing to find its network; holding
+        the button on the board for five seconds resets networking to hotspot mode; and while
+        on your network it is also reachable at <b id="mdnsname">tcam-mini.local</b>.</div>
     </div>
   </div>
 
@@ -924,12 +945,18 @@ function applyWifi(w){
   if(w.ap_ssid){
     $("apssid").value=w.ap_ssid;
     $("mdnsname").textContent=w.ap_ssid.toLowerCase()+".local";
+    $("apname").textContent=w.ap_ssid;
   }
+  if(w.ap_ip_addr) $("apaddr").textContent=w.ap_ip_addr;
   if(w.sta_ssid) $("stassid").value=w.sta_ssid;
   if(w.cur_ip_addr) $("iIp").textContent=w.cur_ip_addr;
+  if(w.sta_ip_addr && w.sta_ip_addr!=="0.0.0.0") $("staip").value=w.sta_ip_addr;
+  if(w.sta_netmask && w.sta_netmask!=="0.0.0.0") $("stamask").value=w.sta_netmask;
   if(w.flags!==undefined){
     netFlags=w.flags|0;
     $("stamode").checked=!!(netFlags & 0x80);
+    $("staticEn").checked=!!(netFlags & 0x10);
+    $("staticBox").style.display=(netFlags & 0x10)?"block":"none";
   }
 }
 
@@ -1230,19 +1257,63 @@ if(window.matchMedia && window.matchMedia("(display-mode: standalone)").matches)
   $("installHint").textContent="Running as an installed app.";
 }
 
+$("staticEn").onchange=function(){
+  $("staticBox").style.display=this.checked?"block":"none";
+};
+
+function validIp(s){
+  var p=String(s).trim().split(".");
+  if(p.length!==4) return false;
+  for(var i=0;i<4;i++){
+    if(!/^\d{1,3}$/.test(p[i])) return false;
+    if(parseInt(p[i],10)>255) return false;
+  }
+  return true;
+}
+
 $("applyNet").onclick=function(){
-  var f=(netFlags | 0x01) & ~0x80;
+  // Start from the flags the camera reported and set only what this form owns:
+  // WiFi enabled at startup, station mode, and the static-address bit
+  var f=(netFlags | 0x01) & ~0x80 & ~0x10;
   if($("stamode").checked) f|=0x80;
-  var args={ ap_ssid:$("apssid").value, sta_ssid:$("stassid").value, flags:f };
+  var args={ ap_ssid:$("apssid").value, sta_ssid:$("stassid").value };
   if($("stapw").value) args.sta_pw=$("stapw").value;
   if(f & 0x80){
     if(!args.sta_ssid){ toast("Enter a network name to join","err"); return; }
+    if($("staticEn").checked){
+      if(!validIp($("staip").value) || !validIp($("stamask").value)){
+        toast("Enter a valid address and subnet mask","err"); return;
+      }
+      f|=0x10;
+      args.sta_ip_addr=$("staip").value.trim();
+      args.sta_netmask=$("stamask").value.trim();
+    }
     if(!confirm("The camera will leave its own access point and join \""+args.sta_ssid+
                 "\".\n\nYou will need to reconnect this device to that network.")) return;
   }
+  args.flags=f;
   send("set_wifi",args);
   netFlags=f;
   toast("Saved — the camera is restarting its network","ok");
+};
+
+// Explicit return to hotspot mode.  Clearing the client-mode bit is all this
+// takes, but it was previously reachable only by unticking a checkbox whose
+// label said nothing about hotspots - a control nobody found when they most
+// needed it.
+$("apModeBtn").onclick=function(){
+  if(!confirm("Switch to hotspot mode?\n\nThe camera will stop joining \""+
+              ($("stassid").value||"your network")+"\" and broadcast \""+
+              $("apssid").value+"\" instead.\n\nReconnect this device to that "+
+              "network, then open http://"+$("apaddr").textContent+"/")) return;
+
+  var f=(netFlags | 0x01) & ~0x80 & ~0x10;
+  send("set_wifi",{ap_ssid:$("apssid").value, flags:f});
+  netFlags=f;
+  $("stamode").checked=false;
+  $("staticEn").checked=false;
+  $("staticBox").style.display="none";
+  toast("Switching to hotspot mode — reconnect to "+$("apssid").value,"ok");
 };
 
 // system tab
