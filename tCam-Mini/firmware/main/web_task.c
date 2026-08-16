@@ -118,13 +118,18 @@ void web_task()
 	// practically noise that has repeatedly been mistaken for a fault.  Warnings
 	// and errors from our own modules are unaffected; define WEB_VERBOSE_NET_LOGS
 	// (in web_task.h) to restore the full output when debugging TLS itself.
-	esp_log_level_set("esp-tls-mbedtls", ESP_LOG_NONE);
-	esp_log_level_set("esp_https_server", ESP_LOG_WARN);
-	esp_log_level_set("httpd", ESP_LOG_ERROR);
+	// Keep the line that says WHY a handshake failed and drop the ones that only
+	// say THAT it failed.  The previous arrangement had this exactly backwards -
+	// esp-tls-mbedtls (which reports the mbedTLS error code) was silenced while
+	// esp_https_server's contentless "esp_tls_create_server_session failed" echo
+	// survived, leaving a failure that could not be diagnosed without a rebuild.
+	esp_log_level_set("esp-tls-mbedtls", ESP_LOG_ERROR);
+	esp_log_level_set("esp_https_server", ESP_LOG_NONE);
+	esp_log_level_set("httpd", ESP_LOG_NONE);
 	esp_log_level_set("httpd_txrx", ESP_LOG_ERROR);
 	esp_log_level_set("httpd_uri", ESP_LOG_ERROR);
 	esp_log_level_set("httpd_parse", ESP_LOG_ERROR);
-	ESP_LOGI(TAG, "Client-abort TLS log noise suppressed (WEB_VERBOSE_NET_LOGS restores it)");
+	ESP_LOGI(TAG, "Redundant TLS log echoes suppressed; failure reasons still logged");
 #endif
 
 	// The listening socket cannot be bound before the interface has an address

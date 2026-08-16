@@ -18,6 +18,12 @@ To monitor diagnostic information from the firmware: ```idf.py -p PORT```.  Outp
 
 ### Revision History
 
+#### FW 4.2
+FW revision 4.2 reverts the PSRAM overclock from 4.1 and restores TLS failure diagnostics.
+
+1. PSRAM returned to 40 MHz.  The 80 MHz setting in 4.1 was a speculative optimization with no measured benefit, and it coincided with TLS handshake failures - every mbedTLS allocation comes from PSRAM (CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC), so marginal PSRAM corrupts crypto working memory.
+2. Log suppression corrected: 4.1 silenced the tag carrying the mbedTLS error code while keeping a contentless echo, making handshake failures undiagnosable without a rebuild.  The reason is logged again; only the redundant echoes are dropped.
+
 #### FW 4.1
 FW revision 4.1 is a streaming efficiency release.
 
